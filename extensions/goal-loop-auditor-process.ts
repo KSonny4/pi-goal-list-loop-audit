@@ -39,7 +39,7 @@ import { checkRegressionShield, parseAuditorVerdict } from "./goal-loop-shield.j
 import { renameWithWindowsRetry } from "../scripts/goal-auditor-launch.mjs";
 import { resolveAuditorAllowedExtensions } from "./auditor-extensions.js";
 import { stableJson, requestHash } from "./auditor-protocol-hash.js";
-import { readAuditorReplay, auditRepositoryHead } from "./auditor-replay.js";
+import { readAuditorReplay, auditRepositoryHead, validateRetainedAuditorResult } from "./auditor-replay.js";
 import { isTerminalAuditorDenial } from "./auditor-failure.js";
 
 export type AuditorInfrastructureClass = "no-verdict" | "timeout" | "transport" | "provider";
@@ -1465,6 +1465,7 @@ export async function runDetachedGoalCompletionAuditor(args: {
         }
         try {
           const result = await readJson<AuditorResultFile>(resultPath);
+          if (runtime.replay) validateRetainedAuditorResult(result);
           if (result.protocolVersion !== PROTOCOL_VERSION || result.attemptId !== attemptId || result.requestHash !== request.requestHash) {
             return infra(model, thinkingLevel, "auditor result identity/request-hash mismatch", "", capturedRevisionToken, "no-verdict");
           }
@@ -1524,6 +1525,9 @@ export async function runDetachedGoalCompletionAuditor(args: {
           args.onProgress?.({ phase: "complete", elapsedMs: now() - startedAt, recentOutput: output.split("\n").filter(Boolean).slice(-8), toolCalls: result.toolCalls, unmatchedToolStarts: [], unmatchedToolEnds: [] });
           return stampToken({ approved: parsed.approved, disapproved: parsed.disapproved, impossible: parsed.impossible, impossibleReason: parsed.impossibleReason, output, model, thinkingLevel }, capturedRevisionToken);
         } catch (error) {
+          // Replay consumes retained evidence once; no worker exists to publish
+          // a missing/replaced result later, so transport waiting is unsafe.
+          if (runtime.replay) throw new Error(`Auditor policy authorization blocked: previous dispatch outcome unknown: retained result unavailable or invalid: ${error instanceof Error ? error.message : String(error)}`);
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") return infra(model, thinkingLevel, `invalid auditor result: ${error instanceof Error ? error.message : String(error)}`, "", capturedRevisionToken, "no-verdict");
         }
         // v0.34.130: a tool-open timeout is independent of both heartbeat

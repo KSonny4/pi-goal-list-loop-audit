@@ -5,7 +5,8 @@ import * as path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { test } from "node:test";
 import { readState } from "../extensions/goal-loop-core.ts";
-import { cancelDetachedGoalCompletionAuditor } from "../extensions/goal-loop-auditor-process.ts";
+import { cancelDetachedGoalCompletionAuditor, runDetachedGoalCompletionAuditor } from "../extensions/goal-loop-auditor-process.ts";
+import { readAuditorReplay } from "../extensions/auditor-replay.ts";
 
 const host = path.resolve("tests/fixtures/auditor-policy-host.ts");
 async function until(predicate: () => boolean, limit = 20000): Promise<void> {
@@ -20,7 +21,20 @@ async function stopped(child: ChildProcess): Promise<void> {
   await new Promise<void>((resolve) => child.once("exit", () => resolve()));
 }
 
-for (const { attempt, retained } of [{ attempt: 1, retained: "none" }, { attempt: 2, retained: "none" }, { attempt: 1, retained: "approved" }, { attempt: 1, retained: "corrupt" }]) {
+const malformedResults: Record<string, Record<string, unknown>> = {
+  "ok-string": { ok: "false" }, "ok-number": { ok: 1 }, "ok-null": { ok: null }, "ok-missing": { ok: undefined },
+  "thinking-number": { thinkingLevel: 1 }, "output-number": { output: 1 }, "tools-object": { toolCalls: {} },
+  "tool-null": { toolCalls: [null] },
+  "tool-name-number": { toolCalls: [{ name: 1, argsPrefix: "", finishedAt: 1 }] },
+  "tool-args-number": { toolCalls: [{ name: "read", argsPrefix: 1, finishedAt: 1 }] },
+  "tool-finished-string": { toolCalls: [{ name: "read", argsPrefix: "", finishedAt: "1" }] },
+};
+for (const { attempt, retained } of [
+  { attempt: 1, retained: "none" }, { attempt: 2, retained: "none" },
+  { attempt: 1, retained: "approved" }, { attempt: 1, retained: "corrupt" },
+  { attempt: 1, retained: "deleted-after-preflight" },
+  ...Object.keys(malformedResults).map((retained) => ({ attempt: 1, retained })),
+]) {
   test(`real complete_goal process loss (attempt ${attempt}, retained ${retained}) reconciles without duplicate`, { timeout: 40000 }, async () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "glla-process-loss-"));
     const settingsPath = path.join(cwd, "settings.json");
@@ -91,9 +105,9 @@ process.stdin.on('data', (chunk) => {
         fs.writeFileSync(path.join(cwd, "release-report"), "ready");
         const resultFile = path.join(cwd, ".pi-glla", "audit-jobs", claim.auditorDispatchStarted!.id, "result.json");
         await until(() => fs.existsSync(resultFile));
-        if (retained === "corrupt") {
+        if (retained === "corrupt" || malformedResults[retained]) {
           const result = JSON.parse(fs.readFileSync(resultFile, "utf8"));
-          result.requestHash = "mismatched";
+          Object.assign(result, retained === "corrupt" ? { requestHash: "mismatched" } : malformedResults[retained]);
           fs.writeFileSync(resultFile, JSON.stringify(result));
         }
       }
@@ -102,6 +116,34 @@ process.stdin.on('data', (chunk) => {
       // or inherited JS module state and cannot mistake cleanup for approval.
       assert.ok(logicalAttempt);
       cancelDetachedGoalCompletionAuditor(cwd, logicalAttempt);
+      if (retained === "deleted-after-preflight") {
+        const goal = readState(cwd).goal!;
+        const jobDir = path.join(cwd, ".pi-glla", "audit-jobs", claim.auditorDispatchStarted!.id);
+        fs.rmSync(path.join(jobDir, "progress.json"), { force: true });
+        const request = readAuditorReplay(cwd, goal, claim)!;
+        assert.ok(request, "intact result-only job passes real preflight");
+        let spawns = 0;
+        const controller = new AbortController();
+        const deadline = setTimeout(() => controller.abort(), 1000);
+        try {
+          const completion = runDetachedGoalCompletionAuditor({
+            cwd, goal, model: request.model, thinkingLevel: request.thinkingLevel,
+            allowedExtensions: request.allowedExtensions, signal: controller.signal,
+            runtime: { replay: true, attemptId: () => request.attemptId, pollIntervalMs: 10,
+              spawn: (() => { spawns++; throw new Error("unexpected replay spawn"); }) as any },
+          });
+          // Replay preflight is synchronous up to its first await (progress
+          // read). Remove the result before that read settles and polling consumes it.
+          fs.unlinkSync(path.join(jobDir, "result.json"));
+          const result = await completion;
+          assert.equal(controller.signal.aborted, false, "replay must terminate without the safety deadline");
+          assert.match(result.error ?? "", /outcome unknown/);
+          assert.equal(result.approved, false); assert.equal(result.disapproved, false);
+          assert.equal(result.fallbackExhausted, true);
+          assert.equal(spawns, 0);
+          assert.equal(JSON.stringify(readState(cwd).goal!.pendingCompletion!.auditorDispatchStarted), receipt);
+        } finally { clearTimeout(deadline); controller.abort(); }
+      }
       child = start("resume");
       await until(() => fs.existsSync(path.join(cwd, "resume-receipt.json")));
       await stopped(child);
@@ -112,6 +154,7 @@ process.stdin.on('data', (chunk) => {
         assert.equal(after.state.goal, null, "retained approval settles through normal archive/shield path");
         assert.equal(fs.readdirSync(path.join(cwd, ".pi-glla", "archive")).filter((name) => name.endsWith(".md")).length, 1);
       } else {
+        assert.ok(after.state.goal, "unknown or malformed retained evidence must never archive the goal");
         assert.equal(JSON.stringify(after.state.goal.pendingCompletion.auditorDispatchStarted), receipt);
         assert.equal(after.state.goal.pendingCompletion.auditorFailureCount, claim.auditorFailureCount);
         assert.match(JSON.stringify(after), /outcome unknown/);

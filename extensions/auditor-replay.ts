@@ -11,6 +11,19 @@ export function auditRepositoryHead(cwd: string): string | null {
   return result.status === 0 && /^[a-f0-9]{40,64}$/.test(result.stdout.trim()) ? result.stdout.trim() : null;
 }
 
+/** Retained JSON is untrusted at both preflight and consumption. */
+export function validateRetainedAuditorResult(result: unknown): void {
+  if (!result || typeof result !== "object" || Array.isArray(result)) throw auditorPolicyError("previous dispatch outcome unknown: malformed retained result");
+  const value = result as Record<string, unknown>;
+  if (typeof value.ok !== "boolean" || typeof value.output !== "string" || typeof value.thinkingLevel !== "string"
+    || typeof value.protocolVersion !== "number" || typeof value.attemptId !== "string" || typeof value.requestHash !== "string" || typeof value.model !== "string"
+    || !Array.isArray(value.toolCalls) || value.toolCalls.some((call: unknown) => {
+      if (!call || typeof call !== "object" || Array.isArray(call)) return true;
+      const tool = call as Record<string, unknown>;
+      return typeof tool.name !== "string" || typeof tool.argsPrefix !== "string" || typeof tool.finishedAt !== "number" || !Number.isFinite(tool.finishedAt);
+    })) throw auditorPolicyError("previous dispatch outcome unknown: malformed retained result");
+}
+
 /** Reconcile only the exact persisted dispatch. Missing/corrupt or mismatched
  * artifacts remain unknown; never synthesize a verdict or rerun that effect. */
 export function readAuditorReplay(cwd: string, goal: Goal, claim: PendingCompletion): AuditorRequest | undefined {
@@ -23,11 +36,12 @@ export function readAuditorReplay(cwd: string, goal: Goal, claim: PendingComplet
     const request = JSON.parse(fs.readFileSync(path.join(dir, "request.json"), "utf8")) as AuditorRequest;
     const { requestHash: hash, ...payload } = request;
     const result = JSON.parse(fs.readFileSync(path.join(dir, "result.json"), "utf8"));
+    validateRetainedAuditorResult(result);
     if (hash !== started.requestHash || requestHash(payload) !== hash || request.attemptId !== started.id
       || request.model !== started.ref || request.cwd !== cwd
       || stableJson(request.goalRevision) !== stableJson(captureGoalRevision(goal))
       || result.protocolVersion !== 1 || result.attemptId !== started.id || result.requestHash !== hash
-      || result.model !== request.model || typeof result.output !== "string" || !Array.isArray(result.toolCalls)) throw new Error("retained result identity mismatch");
+      || result.model !== request.model) throw new Error("retained result identity mismatch");
     return request;
   } catch (error) {
     throw auditorPolicyError(`previous dispatch outcome unknown: ${error instanceof Error ? error.message : String(error)}`);
