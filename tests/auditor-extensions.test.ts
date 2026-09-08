@@ -268,18 +268,18 @@ test("settings round-trip: menu pick persists, load normalizes, clear removes", 
   }
 });
 
-test("saveSettings writes the allowlist and hand-edited junk is normalized on load", () => {
+test("saveSettings writes the allowlist and malformed hand-edited authority is rejected", () => {
   try {
     process.env.GLLA_GLOBAL_SETTINGS_PATH = path.join(os.tmpdir(), `glla-ext-settings2-${process.pid}.json`);
     const cwd = tmpCwd();
     saveSettings("global", cwd, { auditorAllowedExtensions: ["npm:pi-webaio"] });
     assert.deepEqual(loadSettings(cwd).auditorAllowedExtensions, ["npm:pi-webaio"]);
-    // Hand-edited file with junk entries survives as a clean, deduped list.
+    // Malformed authority must not silently become a weaker allowlist.
     fs.writeFileSync(
       globalSettingsPath(),
       JSON.stringify({ auditorAllowedExtensions: ["", "npm:pi-webaio", "npm:bar", 5] }),
     );
-    assert.deepEqual(loadSettings(cwd).auditorAllowedExtensions, ["npm:pi-webaio", "npm:bar"]);
+    assert.throws(() => loadSettings(cwd), /invalid auditorAllowedExtensions/);
   } finally {
     if (ORIGINAL_ENV === undefined) delete process.env.GLLA_GLOBAL_SETTINGS_PATH;
     else process.env.GLLA_GLOBAL_SETTINGS_PATH = ORIGINAL_ENV;

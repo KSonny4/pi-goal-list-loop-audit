@@ -38,6 +38,9 @@ import { buildGoalAuditorPrompt } from "./goal-loop-auditor.js";
 import { checkRegressionShield, parseAuditorVerdict } from "./goal-loop-shield.js";
 import { renameWithWindowsRetry } from "../scripts/goal-auditor-launch.mjs";
 import { resolveAuditorAllowedExtensions } from "./auditor-extensions.js";
+import { stableJson, requestHash } from "./auditor-protocol-hash.js";
+import { readAuditorReplay, auditRepositoryHead } from "./auditor-replay.js";
+import { isTerminalAuditorDenial } from "./auditor-failure.js";
 
 export type AuditorInfrastructureClass = "no-verdict" | "timeout" | "transport" | "provider";
 export type AuditorRecoveryFailureClass = AuditorInfrastructureClass;
@@ -306,6 +309,7 @@ export async function runAuditorFallbackWithPolicy(
   });
 
   for (;;) {
+    if (!isLive()) return { result: { ...noCandidateResult(), error: "Auditor aborted" }, retriedOnce, fallbackUsed, via: sequence[0]!.via };
     // Keep the explicit pure cursor call here. ModelSelector.selectNextValid
     // composes the same helper while adding the forbidden/unregistered walk.
     if (nextUntriedModelRef(currentRef, refs, attempted) === undefined) {
@@ -399,8 +403,19 @@ export async function runAuditorFallbackWithPolicy(
     pendingResult = undefined;
     if (isRetryAttempt) retriedOnce = true;
     const first = normalizeAuditorInfrastructureResult(await run(candidate));
-    if (first.approved || first.disapproved || first.impossible || !first.error) {
+    if (first.fallbackExhausted || first.approved || first.disapproved || first.impossible || !first.error) {
       return { result: first, retriedOnce, fallbackUsed, via: candidate.via };
+    }
+    if (isTerminalAuditorDenial(first.error)) {
+      currentRef = selectedRef;
+      const nextRef = nextUntriedModelRef(currentRef, refs, attempted);
+      const info: AuditorFallbackExhaustionInfo = { candidateRef: selectedRef, candidateRefs: candidateRefs.slice(), attemptedRefs: attempted.slice(), nextCandidateRef: nextRef, failureClass: "provider", delayMs: 0 };
+      if (!callbackAccepted(opts.onCandidateExhausted?.(candidate, first.error, info))) return { result: cursorPersistenceFailure(candidate), retriedOnce, fallbackUsed, via: candidate.via };
+      if (!nextRef) return { result: markExhausted(first, "provider"), retriedOnce, fallbackUsed, via: candidate.via };
+      pendingResult = first;
+      fallbackFrom = candidate;
+      fallbackError = first.error;
+      continue;
     }
     let failure = classifyMainModelFailure(first.error);
     if (!isRetriableInfraError(first.error) || !isMainModelFallbackFailure(failure)) {
@@ -434,7 +449,7 @@ export async function runAuditorFallbackWithPolicy(
       const second = normalizeAuditorInfrastructureResult(await run(candidate));
       pendingResult = second;
       retriedOnce = true;
-      if (second.approved || second.disapproved || second.impossible || !second.error) {
+      if (second.fallbackExhausted || second.approved || second.disapproved || second.impossible || !second.error) {
         return { result: second, retriedOnce, fallbackUsed, via: candidate.via };
       }
       failure = classifyMainModelFailure(second.error);
@@ -444,7 +459,7 @@ export async function runAuditorFallbackWithPolicy(
       currentRef = selectedRef;
       const nextRef = nextUntriedModelRef(currentRef, refs, attempted);
       failureAttempt += 1;
-      fallbackDelayMs = mainModelFailureDelayMs(failure, failureAttempt, opts.retryBaseMinutes ?? 15);
+      fallbackDelayMs = isTerminalAuditorDenial(second.error) ? 0 : mainModelFailureDelayMs(failure, failureAttempt, opts.retryBaseMinutes ?? 15);
       const exhaustedInfo: AuditorFallbackExhaustionInfo = {
         candidateRef: selectedRef,
         candidateRefs: candidateRefs.slice(),
@@ -955,7 +970,7 @@ export function cancelDetachedGoalCompletionAuditor(cwd: string, attemptId: stri
   return killed;
 }
 
-interface AuditorRequest {
+export interface AuditorRequest {
   protocolVersion: number;
   attemptId: string;
   requestHash: string;
@@ -1035,6 +1050,8 @@ interface AuditorProgressFile {
 }
 
 export interface AuditorProcessRuntime {
+  /** Consume the exact retained result using the normal parser; never spawn. */
+  replay?: boolean;
   /** Override the worker launcher command (normally resolved from process.execPath, with a JS-runtime fallback for compiled hosts). */
   command?: string;
   /** Override the worker module (normally scripts/goal-auditor-worker.mjs). */
@@ -1100,17 +1117,7 @@ export interface AuditorStalledInfo {
   toolAgeMs?: number;
 }
 
-/** Return a stable JSON representation for request-hash validation. */
-export function stableJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
-}
-
-export function requestHash(requestWithoutHash: Omit<AuditorRequest, "requestHash">): string {
-  return createHash("sha256").update(stableJson(requestWithoutHash), "utf8").digest("hex");
-}
+export { stableJson, requestHash } from "./auditor-protocol-hash.js";
 
 function modelLabel(model: AuditorModel | undefined): string {
   if (typeof model === "string") return model;
@@ -1271,6 +1278,9 @@ export async function runDetachedGoalCompletionAuditor(args: {
    * detects a wedged worker and auto-cancels the detached job. The parent
    * persists this as the `auditor_stalled` ledger event. */
   onStalled?: (info: AuditorStalledInfo) => void;
+  /** Revalidate effective authority after asynchronous setup, immediately before spawn. */
+  validateDispatch?: () => void;
+  onDispatchReady?: (binding: { requestHash: string; repositoryHead: string | null }) => boolean;
   runtime?: AuditorProcessRuntime;
 }): Promise<GoalAuditorResult> {
   const runtime = args.runtime ?? {};
@@ -1327,6 +1337,14 @@ export async function runDetachedGoalCompletionAuditor(args: {
   let lastProgress: AuditorProgressFile | undefined;
 
   try {
+    let request: AuditorRequest;
+    if (runtime.replay) {
+      args.validateDispatch?.();
+      const retained = readAuditorReplay(args.cwd, args.goal, args.goal.pendingCompletion ?? { at: "" });
+      if (!retained || retained.attemptId !== attemptId || retained.model !== model || retained.thinkingLevel !== thinkingLevel
+        || stableJson(retained.allowedExtensions ?? []) !== stableJson(args.allowedExtensions ?? [])) throw new Error("Auditor policy authorization blocked: retained dispatch differs");
+      request = retained;
+    } else {
     // A fresh host has no in-memory activeChildren map. Reap only durable
     // worker-owned locks for this claim before creating the next attempt.
     reapDurableWorkers(args.cwd, logicalAttemptId);
@@ -1341,7 +1359,7 @@ export async function runDetachedGoalCompletionAuditor(args: {
     // the detached worker (fresh temp npm install online, 0 models
     // offline, wrong base dir for relative paths). Doing this in the
     // process layer means every dispatch path is covered.
-    const allowedExtensions = resolveAuditorAllowedExtensions(args.allowedExtensions, runtime.homeDir ?? os.homedir(), args.cwd);
+    const allowedExtensions = resolveAuditorAllowedExtensions(args.allowedExtensions, runtime.homeDir ?? os.homedir(), args.cwd, undefined, true);
     const requestWithoutHash: Omit<AuditorRequest, "requestHash"> = {
       protocolVersion: PROTOCOL_VERSION,
       attemptId,
@@ -1362,7 +1380,7 @@ export async function runDetachedGoalCompletionAuditor(args: {
       // byte-identically to pre-feature workers.
       ...(args.inspection ? { inspection: true } : {}),
     };
-    const request: AuditorRequest = { ...requestWithoutHash, requestHash: requestHash(requestWithoutHash) };
+    request = { ...requestWithoutHash, requestHash: requestHash(requestWithoutHash) };
     await writeAtomicJson(requestPath, request);
     const initialProgress: AuditorProgressFile = {
       protocolVersion: PROTOCOL_VERSION, attemptId, requestHash: request.requestHash,
@@ -1376,6 +1394,9 @@ export async function runDetachedGoalCompletionAuditor(args: {
     const spawn = runtime.spawn ?? nodeSpawn;
     const env = { ...process.env, ...(runtime.env ?? {}) };
     if (runtime.piBinary) env.GLLA_PI_BINARY = runtime.piBinary;
+    args.validateDispatch?.();
+    if (args.onDispatchReady?.({ requestHash: request.requestHash, repositoryHead: auditRepositoryHead(args.cwd) }) === false) throw new Error("Auditor policy authorization blocked: dispatch binding persistence failed");
+    if (args.signal?.aborted) throw new Error("Auditor aborted");
     child = spawn(command, [workerPath, "--job-dir", jobDir], {
       cwd: args.cwd,
       detached: true,
@@ -1408,6 +1429,7 @@ export async function runDetachedGoalCompletionAuditor(args: {
     const workerPathIdentity = path.isAbsolute(workerPath) ? path.resolve(workerPath) : path.resolve(args.cwd, workerPath);
     await writeAtomicJson(lockPath, { protocolVersion: PROTOCOL_VERSION, attemptId, pid: child.pid, role: "worker", workerPath: workerPathIdentity });
     child.unref();
+    }
 
     let abortTermination: Promise<void> | null = null;
     const abort = () => {
@@ -1668,7 +1690,9 @@ export async function runDetachedGoalCompletionAuditor(args: {
       args.signal?.removeEventListener("abort", abort);
     }
   } catch (error) {
-    return infra(model, thinkingLevel, error instanceof Error ? error.message : String(error), "", capturedRevisionToken, "transport");
+    const message = error instanceof Error ? error.message : String(error);
+    return { ...infra(model, thinkingLevel, message, "", capturedRevisionToken, "transport"),
+      ...(/Auditor policy authorization blocked/i.test(message) ? { fallbackExhausted: true } : {}) };
   } finally {
     if (child && childAlive(child)) await terminateWorker(child).catch(() => {});
     activeChildren.delete(childKey(args.cwd, attemptId));

@@ -17,6 +17,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { readAuditorReplay } from "../auditor-replay.js";
+import { captureAuditorRoutingContract, authorizeAuditorClaim, assertAuditorRoutingContract, auditorDispatchStarted, bindAuditorDispatch, auditorContractIsCurrent } from "../auditor-routing-contract.js";
 
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -636,6 +638,18 @@ export function scheduleParkedCompletionAuditRecovery(ctx: ExtensionContext, pen
 }
 
 function beginCompletionAudit(ctx: ExtensionContext, claim: PendingCompletion, origin: CompletionAuditOrigin): PendingCompletion | undefined {
+  let contract;
+  try {
+    contract = captureAuditorRoutingContract(ctx, resolveAuditorModel);
+    const stored = state.goal?.pendingCompletion ?? claim;
+    assertAuditorRoutingContract(stored.auditorRoutingContract ?? (origin === "complete-goal" && !state.goal?.pendingCompletion ? contract : undefined), contract);
+    const replayable = !!state.goal && !!readAuditorReplay(ctx.cwd, state.goal, stored);
+    authorizeAuditorClaim(stored, contract, origin === "complete-goal" && !state.goal?.pendingCompletion, replayable);
+  } catch (error) {
+    ctx.ui.notify(String(error), "warning");
+    updateGoal({ status: "paused", pauseKind: "error", pauseReason: String(error), pauseResumeAt: undefined }, ctx);
+    return undefined;
+  }
   clearScheduledAuditorRecoveryTimer();
   completionAuditRecoveryArmed = true;
   const startedMs = Date.now();
@@ -667,8 +681,9 @@ function beginCompletionAudit(ctx: ExtensionContext, claim: PendingCompletion, o
     : claim;
   const pending: PendingCompletion = {
     ...claimForAttempt,
+    auditorRoutingContract: contract,
     phase: "running",
-    attemptId: newCompletionAuditAttemptId(),
+    attemptId: claim.auditorDispatchStarted ? claim.attemptId : newCompletionAuditAttemptId(),
     startedAt: new Date(startedMs).toISOString(),
     recoveryAt: undefined,
     recoveryReason: undefined,
@@ -882,7 +897,7 @@ function persistDetachedAuditorCursor(
 
 /**
  * Run a detached audit through a bounded model cascade. Model selection has a
- * primary, ordered fallback chain, and the session model as the last rung.
+ * primary and ordered independent alternatives, with no implicit last rung.
  * A resolved primary can still fail after launch (provider auth, RPC startup,
  * or a dead stream), so selection-time fallback alone is insufficient. Retry
  * the same model once, then advance to the next candidate at most once per
@@ -895,6 +910,7 @@ export async function runDetachedCompletionWithFallback(
   opts: {
     shouldRetry?: () => boolean;
     sleep?: (ms: number) => Promise<void>;
+    replayCandidateRef?: string;
     resumeCandidateRef?: string;
     attemptedRefs?: readonly string[];
     retryCandidateRef?: string;
@@ -909,6 +925,12 @@ export async function runDetachedCompletionWithFallback(
     onSelection?: (event: { scope: { kind: string }; fromRef?: string; toRef?: string; reason: string }) => void;
   } = {},
 ): Promise<{ result: DetachedAuditResult; retriedOnce: boolean; fallbackUsed: boolean; via: string }> {
+  if (opts.replayCandidateRef) {
+    const candidate = candidates.find((entry) => modelRef(entry.model) === opts.replayCandidateRef);
+    if (!candidate) throw new Error("Auditor policy authorization blocked: replay route unavailable");
+    const result = await run(candidate);
+    return { result: { ...result, ...(result.error ? { fallbackExhausted: true } : {}) }, retriedOnce: false, fallbackUsed: false, via: candidate.via };
+  }
   return runAuditorFallbackWithPolicy(candidates, run, {
     forbiddenRefs: opts.forbiddenRefs,
     shouldRetry: opts.shouldRetry,
@@ -1073,12 +1095,18 @@ async function retryStoredCompletionAudit(origin: CompletionAuditOrigin = "provi
           // v0.36.0: raw settings allowlist; the process layer resolves
           // entries to install paths before hashing (see
           // goal-loop-auditor-process.ts).
-          allowedExtensions: settings.auditorAllowedExtensions,
+          allowedExtensions: claim.auditorRoutingContract!.extensions,
           // v0.38.3: opt-in live inspection — persist the auditor's pi as a
           // resumable session pinned inside the job dir (off = --no-session).
           inspection: settings.auditorInspection === true,
+          validateDispatch: () => assertAuditorRoutingContract(claim.auditorRoutingContract, captureAuditorRoutingContract(liveCtx, resolveAuditorModel)),
+          onDispatchReady: (binding) => {
+            const current = detachedAuditContext(generation, goalId, claim.attemptId!);
+            return !!current && !!state.goal?.pendingCompletion && updateGoal({ pendingCompletion: bindAuditorDispatch(state.goal.pendingCompletion, binding) }, current);
+          },
           runtime: {
-            attemptId: () => newDetachedAuditJobAttemptId(claim.attemptId!),
+            replay: !!claim.auditorDispatchStarted,
+            attemptId: () => state.goal!.pendingCompletion!.auditorDispatchStarted!.id,
             logicalAttemptId: claim.attemptId!,
             // v0.37.0: escalated budgets — per-tool ceiling, silence/
             // no-progress window, and first-event window all derive from the
@@ -1114,12 +1142,14 @@ async function retryStoredCompletionAudit(origin: CompletionAuditOrigin = "provi
         forbiddenRefs: settings.forbiddenModels,
         retryBaseMinutes: settings.mainModelRetryMinutes,
         onSelection: (event: { scope: { kind: string }; fromRef?: string; toRef?: string; reason: string }) => appendLedger(liveCtx.cwd, "model_fallback_select", { scope: "auditor", fromRef: event.fromRef, toRef: event.toRef, reason: event.reason }),
+        replayCandidateRef: claim.auditorDispatchStarted?.ref,
         resumeCandidateRef: persistedAuditorCandidateRef,
         attemptedRefs: persistedAuditorAttemptedRefs,
         retryCandidateRef: persistedAuditorRetryCandidateRef,
         retryAttemptStarted: !!claim.auditorRetryAttemptStartedAt,
         retryFailureClass: claim.auditorFailureClass,
         onAttempt: (_candidate, info) => {
+          if (!auditorContractIsCurrent(liveCtx, resolveAuditorModel, claim.auditorRoutingContract)) return false;
           // v0.37.0: this launch's budgets come from the persisted index
           // BEFORE incrementing; the increment persists through the same
           // cursor write, so the NEXT launch (same-candidate retry, candidate
@@ -1143,6 +1173,7 @@ async function retryStoredCompletionAudit(origin: CompletionAuditOrigin = "provi
             claim.attemptId!,
             info,
             {
+              auditorDispatchStarted: auditorDispatchStarted(info.candidateRef, info.attempt),
               auditorCandidateRef: info.candidateRef,
               auditorAttemptedRefs: info.attemptedRefs.slice(0, MAX_AUDITOR_CANDIDATE_REFS),
               auditorRetryAttemptStartedAt: info.attempt === 2 ? new Date().toISOString() : undefined,
@@ -1166,6 +1197,7 @@ async function retryStoredCompletionAudit(origin: CompletionAuditOrigin = "provi
             {
               auditorCandidateRef: info.candidateRef,
               auditorRetryCandidateRef: info.candidateRef,
+              auditorDispatchStarted: undefined,
               auditorRetryAttemptStartedAt: undefined,
               auditorAttemptedRefs: info.attemptedRefs.slice(0, MAX_AUDITOR_CANDIDATE_REFS),
               auditorFailureCount: 1,
@@ -1198,6 +1230,7 @@ async function retryStoredCompletionAudit(origin: CompletionAuditOrigin = "provi
             info,
             next
               ? {
+                auditorDispatchStarted: undefined,
                 auditorCandidateRef: next,
                 auditorRetryCandidateRef: undefined,
                 auditorRetryAttemptStartedAt: undefined,
@@ -1208,6 +1241,7 @@ async function retryStoredCompletionAudit(origin: CompletionAuditOrigin = "provi
                 auditorFailureAt: undefined,
               }
               : {
+                auditorDispatchStarted: undefined,
                 auditorCandidateRef: undefined,
                 auditorRetryCandidateRef: undefined,
                 auditorRetryAttemptStartedAt: undefined,

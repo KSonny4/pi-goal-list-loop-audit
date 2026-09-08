@@ -17,6 +17,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { captureAuditorRoutingContract, assertAuditorRoutingContract, auditorDispatchStarted, bindAuditorDispatch, auditorContractIsCurrent } from "../auditor-routing-contract.js";
 
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -831,7 +832,7 @@ function registerAgentTools(pi: any): void {
           // settings row; max is the safe detached default when a headless
           // context does not expose a thinking level.
           thinkingLevel: (settings.auditorThinkingLevel ?? ctx.thinkingLevel ?? "max") as any, // pi ≥0.83 understands max; dev-types predate it
-          allowedExtensions: settings.auditorAllowedExtensions,
+          allowedExtensions: completionClaim.auditorRoutingContract!.extensions,
           // v0.38.3: opt-in live inspection — persist the auditor's pi as a
           // resumable session pinned inside the job dir (off = --no-session).
           inspection: settings.auditorInspection === true,
@@ -839,8 +840,13 @@ function registerAgentTools(pi: any): void {
           // for the detached audit. It lets the Esc escape hatch settle the
           // worker before offering the user the without-audit choice.
           signal,
+          validateDispatch: () => assertAuditorRoutingContract(completionClaim.auditorRoutingContract, captureAuditorRoutingContract(ctx, resolveAuditorModel)),
+          onDispatchReady: (binding) => {
+            const current = detachedAuditContext(auditGeneration, auditGoalId, auditAttemptId);
+            return !!current && !!state.goal?.pendingCompletion && updateGoal({ pendingCompletion: bindAuditorDispatch(state.goal.pendingCompletion, binding) }, current);
+          },
           runtime: {
-            attemptId: () => newDetachedAuditJobAttemptId(completionClaim.attemptId!),
+            attemptId: () => state.goal!.pendingCompletion!.auditorDispatchStarted!.id,
             logicalAttemptId: completionClaim.attemptId!,
             // v0.37.0: escalated budgets — per-tool ceiling, silence/
             // no-progress window, and first-event window all derive from the
@@ -907,6 +913,7 @@ function registerAgentTools(pi: any): void {
             retryAttemptStarted: !!completionClaim.auditorRetryAttemptStartedAt,
             retryFailureClass: completionClaim.auditorFailureClass,
             onAttempt: (_candidate: AuditorModelCandidate, info: AuditorFallbackAttemptInfo) => {
+              if (!auditorContractIsCurrent(ctx, resolveAuditorModel, completionClaim.auditorRoutingContract)) return false;
               const current = detachedAuditContext(auditGeneration, auditGoalId, auditAttemptId);
               if (!current) return false;
               // v0.37.0: this launch's budgets come from the persisted index
@@ -932,6 +939,7 @@ function registerAgentTools(pi: any): void {
                   auditorCandidateRef: info.candidateRef,
                   auditorAttemptedRefs: info.attemptedRefs.slice(0, MAX_AUDITOR_CANDIDATE_REFS),
                   auditorFailureCount: info.failureCount,
+                  auditorDispatchStarted: auditorDispatchStarted(info.candidateRef, info.attempt),
                   auditorRetryAttemptStartedAt: info.attempt === 2 ? new Date().toISOString() : undefined,
                   ...(info.failureCount === 0 ? {
                     auditorRetryCandidateRef: undefined,
@@ -952,6 +960,7 @@ function registerAgentTools(pi: any): void {
                   auditorCandidateRefs: info.candidateRefs.slice(0, MAX_AUDITOR_CANDIDATE_REFS),
                   auditorCandidateRef: info.candidateRef,
                   auditorRetryCandidateRef: info.candidateRef,
+                  auditorDispatchStarted: undefined,
                   auditorRetryAttemptStartedAt: undefined,
                   auditorAttemptedRefs: info.attemptedRefs.slice(0, MAX_AUDITOR_CANDIDATE_REFS),
                   auditorFailureCount: 1,
@@ -988,6 +997,7 @@ function registerAgentTools(pi: any): void {
                   ...(state.goal?.pendingCompletion ?? completionClaim),
                   auditorCandidateRefs: info.candidateRefs.slice(0, MAX_AUDITOR_CANDIDATE_REFS),
                   auditorCandidateRef: next,
+                  auditorDispatchStarted: undefined,
                   auditorRetryCandidateRef: undefined,
                   auditorRetryAttemptStartedAt: undefined,
                   auditorAttemptedRefs: info.attemptedRefs.slice(0, MAX_AUDITOR_CANDIDATE_REFS),

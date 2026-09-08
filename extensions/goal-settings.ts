@@ -18,6 +18,7 @@ import * as path from "node:path";
 
 import { normalizeAuditorAllowedExtensions } from "./auditor-extensions.ts";
 import { globalSettingsPath, stateRootPending } from "./glla-state-root.js";
+import { auditorPolicyError, readAuditorPolicySnapshot, validateAuditorPolicyInput, validateSnapshotOverrides } from "./auditor-policy-snapshot.js";
 
 import {
   DEFAULT_AUDIT_FEEDBACK_CHARS,
@@ -101,19 +102,17 @@ export interface Settings {
   mainModelPrimaryProbeMinutes?: number;
   /** "provider/model-id" or bare "model-id". Unset → session model. */
   auditorModel?: string;
-  /** Global-only ordered provider/model refs to try after the detached
-   * auditor primary fails or is skipped. The session model remains the final
-   * fallback. The shape and cap match mainModelFallbacks. */
+  /** Ordered authorized alternatives after the detached primary. Project
+   * arrays replace globals, including []; absent inherits. No implicit
+   * session fallback when a primary is configured. Cap matches main. */
   auditorModelFallbacks?: string[];
   /** @deprecated v0.36.0: singular compatibility alias. Reads and writes
    * migrate it to auditorModelFallbacks; new UI/runtime code uses the ordered
    * array. */
   auditorModelFallback?: string;
-  /** v0.31.6: when the pinned auditor IS the session model, walk the
-   * ordered fallback chain (verifier ≠ executor). Default ON (undefined); false =
-   * same-model audits stand — the isolated session + evidence contract is
-   * the first-order defense either way; diversity is the second-order one
-   * the user may deliberately trade away. */
+  /** Legacy unconfigured-mode selection behavior. Default ON (undefined).
+   * Explicit auditor chains always exclude the host route, including false;
+   * this flag never authorizes an unlisted or same-route replacement. */
   auditorSameSessionSwap?: boolean;
   /** v0.34.66: on → the auditor's report text renders FINAL-ONLY in the
    * widget: the live per-token tail is hidden while the detached worker
@@ -286,7 +285,6 @@ const GLOBAL_ONLY_KEYS: ReadonlySet<keyof Settings> = new Set([
   "drafterModelFallbacks",
   "compactorModel",
   "compactorModelFallbacks",
-  "auditorModelFallbacks",
   "auditorToolTimeoutMs",
   "auditorStallMs",
   "auditJobRetentionMs",
@@ -327,7 +325,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // v0.34.127 adds the standalone Auditor thinking row.
   auditorThinkingLevel: undefined,
   // The auditor fallback chain follows the same ordered, bounded picker style
-  // as the main-agent chain. The session model is still the final last resort.
+  // as the main-agent chain. Explicit primary chains have no implicit route.
   auditorModelFallbacks: [],
   // v0.34.66: final-only auditor stream is the default — the HUD never
   // shows the report assembling word-by-word again (note.md #4).
@@ -379,11 +377,12 @@ export function projectSettingsPath(cwd: string): string {
 
 export function readSettingsFile(file: string): Partial<Settings> {
   try {
-    if (!fs.existsSync(file)) return {};
-    const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
-    return typeof parsed === "object" && parsed !== null ? parsed as Partial<Settings> : {};
-  } catch {
-    return {};
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf-8"));
+    validateAuditorPolicyInput(parsed);
+    return parsed as Partial<Settings>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw auditorPolicyError(`cannot read settings ${file}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -515,8 +514,10 @@ function migrateLegacySettings(value: Partial<Settings>): Record<string, unknown
 }
 
 export function loadSettings(cwd: string): Settings {
+  const snapshot = readAuditorPolicySnapshot();
   const project = migrateLegacySettings(readSettingsFile(projectSettingsPath(cwd)));
-  const global = migrateLegacySettings(readSettingsFile(globalSettingsPath()));
+  const global = migrateLegacySettings(snapshot ?? readSettingsFile(globalSettingsPath()));
+  validateSnapshotOverrides(snapshot, project);
   for (const key of GLOBAL_ONLY_KEYS) delete project[key];
   return normalizeLoadedSettings(mergeSettings(
     DEFAULT_SETTINGS as unknown as Record<string, unknown>,
@@ -536,7 +537,7 @@ export function loadSettings(cwd: string): Settings {
 export function loadGlobalSettings(): Settings {
   return normalizeLoadedSettings(mergeSettings(
     DEFAULT_SETTINGS as unknown as Record<string, unknown>,
-    migrateLegacySettings(readSettingsFile(globalSettingsPath())),
+    migrateLegacySettings(readAuditorPolicySnapshot() ?? readSettingsFile(globalSettingsPath())),
   ) as unknown as Settings);
 }
 

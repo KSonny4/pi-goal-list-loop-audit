@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — strict auditor routing (#153)
+
+- Explicit auditor chains no longer append or admit the host route, including swap disabled. Project fallback arrays replace globals, preserving explicit `[]`; malformed authority blocks.
+- Paired snapshot path/SHA-256 enforcement precedes state-root selection and rejects effective project conflicts. Required extensions resolve strictly and dispatch uses captured absolute paths with fresh alias-drift validation.
+- Definite billing/authentication denial consumes one route call without cooldown. Effective routing fingerprints and started receipts fence every retry/restart; exact retained results replay without a new worker, while unknown outcomes and legacy identities block.
+- See [strict auditor routing and recovery](docs/strict-auditor-routing.md) for compatibility, operator reauthorization, retained evidence and deterministic validation. No package release, install, or deployment is included.
+
 ## 0.38.22 — subagent display unification: richness ladder + upstream triple-render report (2026-09-05)
 
 ### Fixed

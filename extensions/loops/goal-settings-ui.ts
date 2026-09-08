@@ -17,6 +17,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { readAuditorPolicySnapshot, validateAuditorPolicyInput } from "../auditor-policy-snapshot.js";
 
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -521,19 +522,22 @@ export function resolveAuditorModel(
 ): { model: any; error?: string; via?: string; fallbackModels?: AuditorModelCandidate[] } {
   const sessionModel = ctx.model as any;
   const currentRef = modelRef(sessionModel);
+  try { validateAuditorPolicyInput({ auditorModel: ref, auditorModelFallbacks: typeof fallbackRefs === "string" ? [fallbackRefs] : fallbackRefs }); }
+  catch (error) { return { model: undefined, error: String(error) }; }
+  const enforced = !!readAuditorPolicySnapshot();
   const tryRef = (trimmed: string): { model?: any; reason?: string } => {
     const slash = trimmed.indexOf("/");
     if (slash > 0) {
       const provider = trimmed.slice(0, slash);
-      const model = ctx.modelRegistry.find(provider, trimmed.slice(slash + 1));
+      const model = ctx.modelRegistry?.find?.(provider, trimmed.slice(slash + 1));
       if (!model) return { reason: "model not found" };
       // An unkeyed provider is unavailable to the detached worker even when
       // the registry knows the model. Keep this check at the resolver edge;
       // runtime failures are handled by the shared retry walker.
-      if (!ctx.modelRegistry.hasConfiguredAuth(model)) return { reason: `no configured auth for ${provider}` };
+      if (!ctx.modelRegistry?.hasConfiguredAuth?.(model)) return { reason: `no configured auth for ${provider}` };
       return { model };
     }
-    const matches = ctx.modelRegistry.getAvailable().filter((m: any) => m.id === trimmed || m.name === trimmed);
+    const matches = (ctx.modelRegistry?.getAvailable?.() ?? []).filter((m: any) => m.id === trimmed || m.name === trimmed);
     const model = matches.find((candidate: any) => ctx.modelRegistry.hasConfiguredAuth(candidate));
     return model ? { model } : { reason: "no available model matching" };
   };
@@ -589,28 +593,17 @@ export function resolveAuditorModel(
       || modelRef(tryRef(primaryRef).model)?.toLowerCase() === currentRef.toLowerCase());
   const addCandidate = (candidateRef: string, model: any, via: string): void => {
     const key = modelRef(model)?.toLowerCase() ?? candidateRef.toLowerCase();
+    if (primaryRef && key === currentRef?.toLowerCase()) return;
     if (seenModels.has(key)) return;
     seenModels.add(key);
-    candidates.push({ ref: candidateRef, model, via });
+    candidates.push({ ref: modelRef(model) ?? candidateRef, model, via });
   };
-  // Unlike main recovery, the auditor may deliberately use the session model
-  // when same-model swapping is disabled. Seed that configured primary before
-  // asking the selector to walk the remaining chain.
-  if (
-    !sameSessionSwap
-    && primaryRef
-    && currentRef
-    && primaryMatchesSession
-    && !forbidden(primaryRef)
-    && sessionModel
-  ) {
-    addCandidate(primaryRef, sessionModel, "setting");
-    attempted.push(primaryRef);
-  }
+  // Explicit chains are independent even with substitution disabled. Only
+  // explicitly listed alternatives may replace a matching host route.
   for (;;) {
     const selected = selector.selectNextValid(
       { kind: "auditor" },
-      sameSessionSwap ? selectorCurrentRef : undefined,
+      primaryRef || sameSessionSwap || enforced ? selectorCurrentRef : undefined,
       attempted,
     );
     for (const visited of selector.lastVisitedRefs) {
@@ -621,9 +614,10 @@ export function resolveAuditorModel(
     addCandidate(selected.ref, selected.model, via);
     if (!attempted.some((entry) => entry.toLowerCase() === selected.ref.toLowerCase())) attempted.push(selected.ref);
   }
-  if (sessionModel && currentRef) addCandidate(currentRef, sessionModel, candidates.length > 0 ? "session-fallback" : "session");
+  if (!primaryRef && !enforced && sessionModel && currentRef && !forbidden(currentRef)
+    && (!ctx.modelRegistry?.hasConfiguredAuth || ctx.modelRegistry.hasConfiguredAuth(sessionModel))) addCandidate(currentRef, sessionModel, candidates.length > 0 ? "session-fallback" : "session");
 
-  const currentPinned = sameSessionSwap && primaryMatchesSession ? primaryRef : undefined;
+  const currentPinned = primaryMatchesSession ? primaryRef : undefined;
   if (currentPinned && currentRef) {
     const replacement = candidates.find((candidate) => candidate.via === "fallback-pin" && candidate.ref?.toLowerCase() !== currentRef.toLowerCase());
     appendLedger(ctx.cwd, "auditor_model_same_as_session", { model: currentRef, fallback: replacement?.ref ?? null });
@@ -641,11 +635,11 @@ export function resolveAuditorModel(
     }
     return { model: first.model, via: first.via, fallbackModels: candidates.slice(1) };
   }
-  return { model: undefined, error: "no session model and no auditorModel configured — set one with /glla → Auditor model" };
+  return { model: undefined, error: "no authorized auditor model available — set an independent route with /glla → Auditor model" };
 }
 
-// Model selection is explicit and bounded: primary pin → ordered fallback
-// models → session model. A resolved primary can still fail after launch, so
+// Model selection is explicit and bounded: primary pin → ordered independent
+// fallbacks. Only unconfigured mode retains session-default compatibility. A resolved primary can still fail after launch, so
 // the completion path walks the same ordered candidates after one same-model
 // retry; every candidate remains a detached extension-less audit. There is
 // no in-process fallback into the parent session and no silent tier ranking.
@@ -1354,7 +1348,7 @@ export async function handleSettingChoice(id: string, ctx: ExtensionContext): Pr
       return;
     }
     case "auditorModelFallbacks": {
-      const settings = loadGlobalSettings();
+      const settings = loadSettings(ctx.cwd);
       const current = normalizeMainModelFallbackRefs(settings.auditorModelFallbacks);
       const configuredPrimary = settings.auditorModel?.trim();
       // auditorModel also accepts a bare model id. Canonicalize it before
@@ -1372,11 +1366,11 @@ export async function handleSettingChoice(id: string, ctx: ExtensionContext): Pr
         { excludeRefs: forbidden, maxSelections: MAX_MAIN_MODEL_FALLBACKS, currentRef: primaryRef },
       );
       if (refs === undefined) return;
-      saveSettings("global", ctx.cwd, { auditorModelFallbacks: refs.length ? refs : undefined });
+      saveSettings(settingsProvenance(ctx.cwd).auditorModelFallbacks.source === "project" ? "project" : "global", ctx.cwd, { auditorModelFallbacks: refs });
       ctx.ui.notify(
         refs.length
           ? `Auditor fallback models saved in order: ${refs.join(" → ")}`
-          : "Auditor fallback models cleared — the session model remains the last resort.",
+          : "Auditor fallback models cleared — no fallback authorized for an explicit primary.",
         "info",
       );
       return;
@@ -1453,7 +1447,7 @@ export async function handleSettingChoice(id: string, ctx: ExtensionContext): Pr
     case "auditorSameSessionSwap": {
       const v = await ctx.ui.select("Same-model swap — when the pinned auditor IS the session model, walk the ordered fallback chain (a same-family model shares the executor's blind spots)", [
         "on — the verifier differs from the executor (default)",
-        "off — same-model audits stand; isolation + evidence contract still apply",
+        "off — legacy unconfigured mode only; explicit auditor chains remain independent",
       ]);
       if (v) saveSettings("global", ctx.cwd, { auditorSameSessionSwap: v.startsWith("off") ? false : undefined });
       return;

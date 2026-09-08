@@ -10,6 +10,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
+import { normalizeAuditorRoutingContract, type AuditorRoutingContract } from "./auditor-routing-state.js";
 import { execSync } from "node:child_process";
 import { normalizeProviderErrorText, providerErrorFingerprint, providerErrorPresentation, sanitizeProviderAuditReport, sanitizeProviderDisplayText, type QuotaSignal } from "./quota-retry.js";
 import { MAX_AUDITOR_CANDIDATE_REFS, MAX_MAIN_MODEL_FALLBACKS, normalizeBoundedModelRefs } from "./main-model-recovery.js";
@@ -299,6 +300,8 @@ export interface PendingCompletion {
    * identifiers only — never model objects or credentials. The current ref
    * is retried at most once; attemptedRefs contains only candidates already
    * exhausted before it. */
+  auditorRoutingContract?: AuditorRoutingContract;
+  auditorDispatchStarted?: { id: string; ref: string; attempt: 1 | 2; at: string; requestHash?: string; repositoryHead?: string | null };
   auditorCandidateRefs?: string[];
   auditorCandidateRef?: string;
   /** Set only after the first transient failure; a restart uses this marker
@@ -2047,6 +2050,7 @@ function normalizePendingCompletion(value: unknown): PendingCompletion {
     retryFromUpstream: _retryFromUpstream,
     resetAt: _resetAt,
     phase: _phase,
+    auditorRoutingContract: _auditorRoutingContract,
     auditorCandidateRefs: _auditorCandidateRefs,
     auditorCandidateRef: _auditorCandidateRef,
     auditorRetryCandidateRef: _auditorRetryCandidateRef,
@@ -2102,6 +2106,7 @@ function normalizePendingCompletion(value: unknown): PendingCompletion {
       : undefined;
   return {
     ...canonicalOrUnknown,
+    auditorRoutingContract: normalizeAuditorRoutingContract(_auditorRoutingContract),
     ...(auditorCandidateRefs !== undefined ? { auditorCandidateRefs } : {}),
     ...(auditorCandidateRef ? { auditorCandidateRef } : {}),
     ...(auditorRetryCandidateRef ? { auditorRetryCandidateRef } : {}),

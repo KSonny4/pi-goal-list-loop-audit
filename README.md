@@ -407,7 +407,15 @@ Open `/glla` for the settings table. The most important choices are:
   unset, auditor thinking inherits the parent session dial (including `max`);
 - **Main-agent and auditor fallback models:** both roles use the same ordered,
   deselectable, bounded fallback-chain picker for provider failures; the
-  auditor's session model remains the final last resort;
+  an explicit auditor primary permits only listed independent alternatives
+  (never an implicit session fallback); project `[]` clears inherited fallbacks;
+- **Auditor authorization:** captured effective routing and required extension
+  paths remain fixed across retries. Missing or conflicting snapshot authority,
+  legacy identity-less claims, and interrupted dispatches without exact retained
+  results block without a verdict or duplicate call. Cancel and explicitly create
+  a new goal to authorize a changed policy. Only unconfigured local sessions
+  retain the session-model default; `auditorSameSessionSwap=false` does not allow
+  same-route auditing for an explicit primary.
 - **Auto-resume:** whether persisted work may restart automatically after a
   session loads; explicit resume commands are always available;
 - **State root:** `workingDir` by default, opt-in `sessionDir`;

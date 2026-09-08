@@ -389,7 +389,7 @@ export function buildSettingsRows(
         ? `${settings.auditorModelFallbacks.length}/${MAX_MAIN_MODEL_FALLBACKS} · ${settings.auditorModelFallbacks.map((ref, index) => `${index + 1}. ${modelThinkingText(ref, auditorThinking, subagent)}`).join(" → ")}`
         : `0/${MAX_MAIN_MODEL_FALLBACKS} · ${sessionRef} · ${auditorThinking} (last resort)`,
       sourceText: src("auditorModelFallbacks"),
-      description: "ordered and deselectable: auditor primary → fallback 1 → fallback 2…; every recoverable auditor failure advances one eligible candidate at a time, then returns to the session model",
+      description: "explicit independent chain: auditor primary → fallback 1 → fallback 2…; empty means no fallback, never an implicit session route",
     },
     {
       id: "auditorAllowedExtensions",
@@ -410,7 +410,7 @@ export function buildSettingsRows(
       label: "Same-model swap",
       valueText: show("auditorSameSessionSwap", "on"),
       sourceText: src("auditorSameSessionSwap"),
-      description: "when the pinned auditor IS the session model, walk the ordered fallback chain (verifier ≠ executor) — off = same-model audits stand",
+      description: "legacy unconfigured-mode preference; explicit auditor chains always require verifier ≠ executor, even off",
     },
     {
       id: "auditorSilent",

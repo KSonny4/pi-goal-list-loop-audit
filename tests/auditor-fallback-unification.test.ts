@@ -118,7 +118,7 @@ test("auditor ordered fallback refs retain order and use the main normalizer", a
   await withFakeContext(({ ctx, primary, fallback1, fallback2, session }) => {
     const resolved = resolveAuditorModel(ctx, "test/primary", ["test/fallback-1", "test/fallback-2"], true);
     const walked = [resolved.model, ...(resolved.fallbackModels ?? []).map((candidate: any) => candidate.model)];
-    assert.deepEqual(walked, [primary, fallback1, fallback2, session]);
+    assert.deepEqual(walked, [primary, fallback1, fallback2]);
     assert.deepEqual(
       normalizeMainModelFallbackRefs(["test/primary", "TEST/PRIMARY", "test/fallback-1"]),
       ["test/primary", "test/fallback-1"],
@@ -133,8 +133,8 @@ test("auditor keeps all ten fallback slots after a pinned primary", async () => 
     const resolved = resolveAuditorModel(ctx, "test/primary", fallbackRefs, true);
     const walked = [resolved.model, ...(resolved.fallbackModels ?? []).map((candidate: any) => candidate.model)]
       .map((model: any) => `${model.provider}/${model.id}`);
-    assert.deepEqual(walked, ["test/primary", ...fallbackRefs, "test/session"]);
-    assert.equal(walked.at(-1), `${session.provider}/${session.id}`, "session remains the final last resort");
+    assert.deepEqual(walked, ["test/primary", ...fallbackRefs]);
+    assert.ok(!walked.includes(`${session.provider}/${session.id}`), "explicit chains never append the host session");
   });
 });
 

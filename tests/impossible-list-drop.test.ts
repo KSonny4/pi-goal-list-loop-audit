@@ -16,6 +16,8 @@
 // behavior is ledgered (list_item_impossible + list_item_auto_dropped) and
 // tested; suite green + tsc clean.
 
+import { captureAuditorRoutingContract } from "../extensions/auditor-routing-contract.js";
+import { resolveAuditorModel } from "../extensions/loops/goal-settings-ui.js";
 import { test, afterEach } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -264,6 +266,7 @@ test("stored-claim full IMPOSSIBLE retry also terminalizes with its recap", asyn
           at: new Date().toISOString(),
           phase: "recovery-pending",
           attemptId: "stored-impossible-attempt",
+          auditorRoutingContract: captureAuditorRoutingContract(ownerCtx(cwd) as any, resolveAuditorModel),
         },
       }),
     });
