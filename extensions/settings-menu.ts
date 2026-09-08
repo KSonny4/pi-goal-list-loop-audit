@@ -387,7 +387,9 @@ export function buildSettingsRows(
       label: `Fallback models (up to ${MAX_MAIN_MODEL_FALLBACKS})`,
       valueText: settings.auditorModelFallbacks?.length
         ? `${settings.auditorModelFallbacks.length}/${MAX_MAIN_MODEL_FALLBACKS} · ${settings.auditorModelFallbacks.map((ref, index) => `${index + 1}. ${modelThinkingText(ref, auditorThinking, subagent)}`).join(" → ")}`
-        : `0/${MAX_MAIN_MODEL_FALLBACKS} · ${sessionRef} · ${auditorThinking} (last resort)`,
+        : settings.auditorModel
+          ? `0/${MAX_MAIN_MODEL_FALLBACKS} · none authorized`
+          : `0/${MAX_MAIN_MODEL_FALLBACKS} · ${sessionRef} · ${auditorThinking} (last resort)`,
       sourceText: src("auditorModelFallbacks"),
       description: "explicit independent chain: auditor primary → fallback 1 → fallback 2…; empty means no fallback, never an implicit session route",
     },
