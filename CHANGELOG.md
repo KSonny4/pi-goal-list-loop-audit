@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — rapid-first-hour + same-model-first
+
+- Main-model recovery is now rapid-first: flat 5s probes for the first 720 attempts (~first hour via `MAIN_MODEL_RAPID_ATTEMPTS`), then `base → 2x → 4x → cap 5h` ladder. `mainModelFailureDelayMs` delegates to `mainModelRetryDelayMs` (single source).
+- Same-model-first minute: `tryMainModelFallback` + delayed probes stay on the current model for the first 12 attempts (`MAIN_MODEL_SAME_MODEL_ATTEMPTS`, 12x5s) before walking the fallback chain. Blips recover without a switch.
+
 ## 0.38.27 — selective port of PRs #45/#46: /loop pause + widget subtask count (2026-09-08)
 
 ### Added
@@ -36,6 +41,12 @@
 - Option-2 worker rows: one glyph-first line per tracked child (`▶ scout · ui-fixes · silent 2m`, `⚠ worker · art-batch · silent 31m`), age before any suffix so narrow-terminal truncation cuts the least important field first. The `→ <objective>` task-linkage header is gone (the card head already names the objective — it repeated it verbatim), ids stay in the `/glla agents` table, overflow names its count only. `/glla agents` full table untouched (`└ blocks:`, Recent hangs, abort guidance all intact).
 - Evidence lifesign on active-clear heads: freshest-worker-evidence readout as the last head segment (`· stream 8s`), breathing glyph derived from evidence counters (`Σ toolUses + outputTokens mod 4` over `●→◉→○→◉`) — never from wall-clock, so the widget key stays stable between evidence and the v0.37.1 re-layout cannot return. Fresh (<5m) breathes, aging (5–30m) freezes the ring, stale (30m+) hollows it, a hung child triangles the head. Non-active statuses (⏸/⟡/⚠/⏳) keep their own glyph language; no rows means no readout invented.
 - Semantic color ramp on head glyph + age text + row glyphs only (success <5m, warning to 30m, error past it; queued caps at amber — waiting is not broken; meter stays progress-colored, fleet line untouched). Color never rides alone: glyph shape (▶/◉/⚠) plus the silence number carry the same meaning unpainted, and a no-theme render contains zero ANSI. Coverage: `tests/lifesign.test.ts` (7 tests: bands incl. queued cap, empty-invents-nothing, counter-derived breath, head readout/triangle/pause/bare, row color + unpainted shape+number, 80-col fit + bucket key-stability) plus reshaped pins in `display`/`agents-panel`/`subagent-display-richness`.
+## Unreleased — strict auditor routing (#153)
+
+- Explicit auditor chains no longer append or admit the host route, including swap disabled. Project fallback arrays replace globals, preserving explicit `[]`; malformed authority blocks.
+- Paired snapshot path/SHA-256 enforcement precedes state-root selection and rejects effective project conflicts. Required extensions resolve strictly and dispatch uses captured absolute paths with fresh alias-drift validation.
+- Definite billing/authentication denial consumes one route call without cooldown. Effective routing fingerprints and started receipts fence every retry/restart; exact retained results replay without a new worker, while unknown outcomes and legacy identities block.
+- See [strict auditor routing and recovery](docs/strict-auditor-routing.md) for compatibility, operator reauthorization, retained evidence and deterministic validation. No package release, install, or deployment is included.
 
 ## 0.38.22 — subagent display unification: richness ladder + upstream triple-render report (2026-09-05)
 

@@ -173,7 +173,7 @@ test("model-picker: active model row uses the available width for selection", ()
   assert.equal(line.slice("<selected>".length, -"</selected>".length).length, 58);
 });
 
-test("v0.29.17 wiring: model-valued settings use the fuzzy picker; unavailable auditor models fall back LOUDLY to the session model", () => {
+test("v0.29.17 wiring: model-valued settings use the fuzzy picker; unavailable explicit auditor models block without session fallback", () => {
   const SRC = readGoalRuntimeSource();
   // The picker hosts via ctx.ui.custom over buildModelPickItems:
   // v0.35.24: the auditor slot threads opts.excludeRefs (forbidden-models
@@ -193,7 +193,7 @@ test("v0.29.17 wiring: model-valued settings use the fuzzy picker; unavailable a
   assert.match(pinBody, /promptModelRef\(ctx, `Model pin for \$\{agentType\} subagents`/);
   // Fallback: unavailable configured model → session model, notified + ledgered:
   assert.match(SRC, /auditor_model_fallback/);
-  assert.match(SRC, /if \(sessionModel && currentRef\) addCandidate\(currentRef, sessionModel, candidates\.length > 0 \? "session-fallback" : "session"\)/);
+  assert.match(SRC, /if \(!primaryRef && !enforced && sessionModel && currentRef/);
   assert.match(SRC, /falling back to the session model\. Fix via \/glla → Auditor model/);
   assert.match(SRC, /no configured auth for \$\{provider\}/, "unkeyed provider counts as unavailable");
 });
@@ -266,13 +266,13 @@ test("v0.36.0: the auditor chain — pinned primary → ordered fallbacks → se
   assert.ok(!SRC.includes("pickDiverseAuditorModel") && !SRC.includes('"diverse"'), "diverse strategy removed");
 });
 
-test("v0.31.6: same-model swap toggle — default ON, off = same-model audits stand", () => {
+test("v0.31.6: same-model swap toggle — default ON, explicit chains stay independent even with swap off", () => {
   const SRC = readGoalRuntimeSource();
   assert.match(SRC, /sameSessionSwap = true,\n\): \{ model: any; error\?: string; via\?: string; fallbackModels\?: AuditorModelCandidate\[\] \} \{/);
   assert.equal(SRC.match(/settings\.auditorSameSessionSwap !== false/g)!.length, 2, "both audit call sites pass the toggle (undefined = on)");
-  assert.match(SRC, /const currentPinned = sameSessionSwap && primaryMatchesSession/); // same-model guard remains explicit
+  assert.match(SRC, /const currentPinned = primaryMatchesSession/); // same-model guard remains explicit
   assert.match(SRC, /case "auditorSameSessionSwap": \{/);
-  assert.match(SRC, /off — same-model audits stand; isolation \+ evidence contract still apply/);
+  assert.match(SRC, /off — legacy unconfigured mode only; explicit auditor chains remain independent/);
   const SETTINGS = fs.readFileSync("extensions/goal-settings.ts", "utf-8");
   assert.match(SETTINGS, /auditorSameSessionSwap\?: boolean;/);
   assert.match(SETTINGS, /Default ON \(undefined\)/);

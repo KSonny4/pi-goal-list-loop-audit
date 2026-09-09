@@ -364,7 +364,7 @@ test("v0.36.0: auditor fallback editor preserves ordered refs, caps at ten, and 
 
     ctx.ui.inputImpl = async () => "   ";
     await handleSettingChoice("auditorModelFallbacks", ctx as unknown as ExtensionContext);
-    assert.equal("auditorModelFallbacks" in readGlobal(), false, "clearing removes the persisted chain");
+    assert.deepEqual(readGlobal().auditorModelFallbacks, [], "clearing persists an explicit empty chain");
     assert.deepEqual(loadSettings(tmpCwd()).auditorModelFallbacks, [], "reload keeps the empty default");
   } finally {
     restoreGlobal();

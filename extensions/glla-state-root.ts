@@ -10,6 +10,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { readAuditorPolicySnapshot } from "./auditor-policy-snapshot.js";
 
 export type GllaStateRoot = "workingDir" | "sessionDir";
 
@@ -70,6 +71,8 @@ export function resolveRuntimeSessionDir(): string | undefined {
 }
 
 function readStateRootSetting(): GllaStateRoot {
+  const snapshot = readAuditorPolicySnapshot();
+  if (snapshot) return "workingDir";
   try {
     const raw = JSON.parse(fs.readFileSync(configuredGlobalSettingsPath(), "utf8")) as Record<string, unknown>;
     return raw.stateRoot === "sessionDir" ? "sessionDir" : "workingDir";

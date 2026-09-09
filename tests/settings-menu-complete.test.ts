@@ -164,7 +164,21 @@ test("v0.36.0: unset auditor thinking mirrors the parent session and the fallbac
   assert.equal(byId.get("auditorModel")?.valueText, "provider/auditor · max");
   assert.equal(byId.get("auditorThinkingLevel"), undefined, "thinking is selected with the model, not as a standalone row");
   assert.equal(byId.get("auditorModelFallbacks")?.valueText, "1/10 · 1. provider/backup · max");
-  assert.match(byId.get("auditorModelFallbacks")?.description ?? "", /ordered and deselectable/);
+  assert.match(byId.get("auditorModelFallbacks")?.description ?? "", /explicit independent chain/);
+  assert.match(byId.get("auditorModelFallbacks")?.description ?? "", /never an implicit session route/);
+
+  const explicitEmpty = buildSettingsRows(
+    { auditorModel: "provider/auditor", auditorModelFallbacks: [] } as Settings,
+    EMPTY_PROV,
+    { sessionModel: "provider/session", sessionThinkingLevel: "max" },
+  );
+  assert.equal(explicitEmpty.find((row) => row.id === "auditorModelFallbacks")?.valueText, "0/10 · none authorized");
+  const unconfigured = buildSettingsRows(
+    { auditorModelFallbacks: [] } as Settings,
+    EMPTY_PROV,
+    { sessionModel: "provider/session", sessionThinkingLevel: "max" },
+  );
+  assert.equal(unconfigured.find((row) => row.id === "auditorModelFallbacks")?.valueText, "0/10 · provider/session · max (last resort)");
 });
 
 test("inherited drafter and auditor model rows identify the session category", () => {

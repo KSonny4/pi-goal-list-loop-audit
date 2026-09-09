@@ -98,7 +98,12 @@ function parseGitSpec(source: string): { host: string; repoPath: string } | unde
   return { host, repoPath: parts.join("/") };
 }
 
-function firstExisting(candidates: string[]): string | undefined {
+function firstExisting(candidates: string[], strict = false): string | undefined {
+  if (strict) {
+    const existing = [...new Set(candidates.filter((candidate) => fs.existsSync(candidate)).map((candidate) => fs.realpathSync(candidate)))];
+    if (existing.length !== 1) throw new Error("Auditor policy authorization blocked: missing or ambiguous required extension");
+    return existing[0];
+  }
   for (const candidate of candidates) {
     try {
       if (fs.existsSync(candidate)) return candidate;
@@ -124,7 +129,7 @@ function resolveSettingsPath(input: string, baseDir: string, home: string): stri
  * (fail-closed) rather than emit an unloadable spec. */
 export function resolveAuditorExtensionSpec(
   spec: string,
-  opts: { home: string; cwd?: string; base?: string },
+  opts: { home: string; cwd?: string; base?: string; strict?: boolean },
 ): string | undefined {
   const agentDir = path.join(opts.home, ".pi", "agent");
   const projectDir = opts.cwd ? path.join(opts.cwd, ".pi") : undefined;
@@ -135,21 +140,21 @@ export function resolveAuditorExtensionSpec(
     return firstExisting([
       path.join(agentDir, "npm", "node_modules", name),
       ...(projectDir ? [path.join(projectDir, "npm", "node_modules", name)] : []),
-    ]);
+    ], opts.strict);
   }
   const git = parseGitSpec(trimmed);
   if (git) {
     return firstExisting([
       path.join(agentDir, "git", git.host, ...git.repoPath.split("/")),
       ...(projectDir ? [path.join(projectDir, "git", git.host, ...git.repoPath.split("/"))] : []),
-    ]);
+    ], opts.strict);
   }
   // Local path: `~`/absolute as-is, relative against the settings base dir
   // (NOT the auditor's future cwd — pi resolves -e against cwd, so emitting
   // a relative spec would silently load nothing).
   if (/^[a-z]+:/.test(trimmed)) return undefined; // unknown scheme — no safe resolution
   const resolved = resolveSettingsPath(trimmed, opts.base ?? agentDir, opts.home);
-  return firstExisting([resolved]);
+  return firstExisting([resolved], opts.strict);
 }
 
 /** Resolve an allowlist to worker-ready install paths: every entry maps to
@@ -159,6 +164,7 @@ export function resolveAuditorAllowedExtensions(
   home: string,
   cwd?: string,
   settingsBase?: string,
+  strict = false,
 ): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -173,9 +179,10 @@ export function resolveAuditorAllowedExtensions(
         ? [projectBase, userBase]
         : [userBase];
     const candidates = bases
-      .map((base) => resolveAuditorExtensionSpec(trimmed, { home, cwd, base }))
+      .map((base) => resolveAuditorExtensionSpec(trimmed, { home, cwd, base, strict: strict && !isLocal }))
       .filter((resolved): resolved is string => !!resolved);
-    const unique = [...new Set(candidates)];
+    const unique = [...new Set(strict ? candidates.map((candidate) => fs.realpathSync(candidate)) : candidates)];
+    if (strict && unique.length !== 1) throw new Error(`Auditor policy authorization blocked: required extension ${spec} is missing or ambiguous`);
     // A relative entry found in both scopes is ambiguous: silently choosing
     // one could load a different extension than the settings author named.
     if (unique.length !== 1 || seen.has(unique[0]!)) continue;

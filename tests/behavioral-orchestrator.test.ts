@@ -45,6 +45,8 @@ afterEach(() => setGlobalAutoResume(false));
 
 import { appendAuditLog, queueItemSidecarCount, readState, writeQueueItemFile } from "../extensions/goal-loop-core.js";
 import { MockPi, invalidateHostSession, makeMockCtx, tmpCwd, seedState, seedGoal, seedLoop, staleError, tick, type MockCtx } from "./harness/mock-pi.js";
+import { captureAuditorRoutingContract } from "../extensions/auditor-routing-contract.js";
+import { resolveAuditorModel } from "../extensions/loops/goal-settings-ui.js";
 import { readGoalRuntimeSource } from "./harness/goal-source.js";
 
 const GOAL_SRC = readGoalRuntimeSource();
@@ -80,6 +82,24 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 30_000): Promise<
   }
 }
 
+async function removeRetainedRequest(cwd: string): Promise<string> {
+  await waitUntil(() => fs.existsSync(path.join(cwd, "auditor-calls")));
+  const receipt = readState(cwd).goal!.pendingCompletion!.auditorDispatchStarted!;
+  assert.ok(receipt.requestHash, "the real effect was durably bound before launch");
+  // Model lost retained evidence, not a fabricated success or a new cursor.
+  fs.unlinkSync(path.join(cwd, ".pi-glla", "audit-jobs", receipt.id, "request.json"));
+  return JSON.stringify(receipt);
+}
+
+function assertUnknownAuditHeld(cwd: string, receipt: string, priorRecoveries = 0): void {
+  const goal = readState(cwd).goal!;
+  assert.equal(goal.status, "paused");
+  assert.equal(goal.pendingCompletion?.phase, "recovery-pending");
+  assert.equal(JSON.stringify(goal.pendingCompletion?.auditorDispatchStarted), receipt, "spent receipt survives");
+  assert.equal(fs.readFileSync(path.join(cwd, "auditor-calls"), "utf8").trim().split("\n").length, 1, "no duplicate effect");
+  assert.equal(readLedger(cwd).filter((entry) => entry.type === "audit_recovery_started").length, priorRecoveries);
+}
+
 function readLedger(cwd: string): Array<{ type: string; value: Record<string, unknown> }> {
   const file = path.join(cwd, ".pi-glla", "active.jsonl");
   return fs.readFileSync(file, "utf8")
@@ -104,6 +124,7 @@ function assertCompactRecap(message: string, context: string): void {
 function writeFakeAuditorError(cwd: string, error: string, delayMs = 0): string {
   const script = path.join(cwd, "fake-auditor-error-pi.mjs");
   fs.writeFileSync(script, `#!/usr/bin/env node
+import fs from "node:fs";
 let input = "";
 let handled = false;
 const error = ${JSON.stringify(error)};
@@ -111,6 +132,7 @@ process.stdin.on("data", async (chunk) => {
   input += chunk;
   if (handled || !input.includes("\\n")) return;
   handled = true;
+  fs.appendFileSync(${JSON.stringify(path.join(cwd, "auditor-calls"))}, "call\\n");
   await new Promise((resolve) => setTimeout(resolve, ${delayMs}));
   process.stdout.write(JSON.stringify({ type: "error", errorMessage: error }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
@@ -123,12 +145,14 @@ process.stdin.on("data", async (chunk) => {
 function writeFakeAuditor(cwd: string, verdict: "approved" | "disapproved", delayMs = 0, reportOverride?: string): string {
   const script = path.join(cwd, "fake-auditor-pi.mjs");
   fs.writeFileSync(script, `#!/usr/bin/env node
+import fs from "node:fs";
 let input = "";
 let handled = false;
 process.stdin.on("data", async (chunk) => {
   input += chunk;
   if (handled || !input.includes("\\n")) return;
   handled = true;
+  fs.appendFileSync(${JSON.stringify(path.join(cwd, "auditor-calls"))}, "call\\n");
   await new Promise((resolve) => setTimeout(resolve, ${delayMs}));
   const emit = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
   const report = ${JSON.stringify(reportOverride ?? (verdict === "approved" ? "<evidence>\\npinned\\n</evidence>\\n<approved/>" : "## Required fixes\\n- fix the pinned gap\\n<disapproved/>"))};
@@ -460,6 +484,7 @@ test("v0.36.0: aborted detached audit can complete without audit only after arch
       verificationSummary: "The worker is deliberately aborted before a verdict.",
     }, ctx, controller.signal);
     await waitUntil(() => (readState(cwd).goal as { status?: string } | null)?.status === "auditing");
+    await waitUntil(() => fs.existsSync(path.join(cwd, "auditor-calls")));
     controller.abort();
     await queued;
     await waitUntil(() => readState(cwd).goal === null);
@@ -2612,6 +2637,7 @@ test("v0.35.x: a successful main-model recovery gives a parked audit its one aut
         at: new Date().toISOString(),
         phase: "recovery-pending",
         attemptId: "parked-before-main-recovery",
+        auditorRoutingContract: captureAuditorRoutingContract(ownerCtx(cwd) as any, resolveAuditorModel),
       },
     }),
     mainModelRecovery: {
@@ -3152,11 +3178,10 @@ test("goal-start notify has no (id: …) suffix (v0.28.24 source pin)", () => {
   const first = await freshSession(cwd, "startup");
   await pi.command("goal", "start lifecycle completion target — done when pinned", first);
   await tick();
-  const originalModel = (first as unknown as { model: unknown }).model;
+  const previous = process.env.GLLA_PI_BINARY;
+  process.env.GLLA_PI_BINARY = writeFakeAuditor(cwd, "approved", 5000);
   try {
-    // No model makes the isolated auditor return immediately without a
-    // provider call; the replacement is delivered at its await boundary.
-    (first as unknown as { model: unknown }).model = undefined;
+    // A valid fake peer holds a real effect across the lifecycle boundary.
     const audit = pi.runTool("complete_goal", {
       completionSummary: "The lifecycle regression is covered.",
       verificationSummary: "The replacement session must retain this claim.",
@@ -3168,6 +3193,7 @@ test("goal-start notify has no (id: …) suffix (v0.28.24 source pin)", () => {
     assert.equal(claimed.pendingCompletion?.phase, "running", "the durable claim records an active audit attempt");
     assert.ok(claimed.pendingCompletion?.attemptId, "the attempt has a durable id");
 
+    const receipt = await removeRetainedRequest(cwd);
     const replacement = ownerCtx(cwd);
     await pi.fire("session_start", { reason: "reload" }, replacement);
     const result = await audit;
@@ -3179,13 +3205,14 @@ test("goal-start notify has no (id: …) suffix (v0.28.24 source pin)", () => {
     assert.ok(["running", "recovery-pending"].includes(after.pendingCompletion?.phase ?? ""), "the fresh lifecycle uses an explicit phase");
     const ledger = fs.readFileSync(path.join(cwd, ".pi-glla", "active.jsonl"), "utf8");
     assert.match(ledger, /"audit_recovery_pending"/, "replacement marks the old attempt as recovery-pending");
-    assert.match(ledger, /"audit_recovery_started"/, "replacement starts a fresh stored-claim attempt immediately");
+    assertUnknownAuditHeld(cwd, receipt);
     assert.doesNotMatch(ledger, /"goal_archived"/, "the stale audit did not archive the goal");
     assert.equal(first.ui.matching("Goal complete").length, 0, "the old UI did not receive a completion notice");
     assert.equal(first.ui.matching("auditor approved").length, 0, "the old generation did not apply a detached result");
     await pi.fire("session_shutdown", { reason: "quit" }, replacement);
   } finally {
-    (first as unknown as { model: unknown }).model = originalModel;
+    if (previous === undefined) delete process.env.GLLA_PI_BINARY;
+    else process.env.GLLA_PI_BINARY = previous;
   }
 });
 
@@ -3724,7 +3751,7 @@ test("v0.34.21 lifecycle: cold startup holds a recovered claim until explicit re
   assert.ok((ctx.ui.widgets["pi-glla"] as string[]).some((line) => line.includes("auditor: parked — no verdict")), "the widget names the parked auditor (v0.34.87 surface separation)");
 });
 
-test("v0.35.x: validated session handoff auto-retries a parked completion audit", async () => {
+test("v0.35.x: validated session handoff holds an unknown started audit without redispatch", async () => {
   __testOnlyResetStaleFlag();
   const cwd = tmpCwd();
   const fakePi = writeFakeAuditor(cwd, "disapproved", 350);
@@ -3739,6 +3766,7 @@ test("v0.35.x: validated session handoff auto-retries a parked completion audit"
       verificationSummary: "A fresh session must retry the stored claim without manual resume.",
     }, first);
     await waitUntil(() => (readState(cwd).goal as { status?: string } | null)?.status === "auditing");
+    const receipt = await removeRetainedRequest(cwd);
     const before = readState(cwd).goal as { pendingCompletion?: { attemptId?: string } };
     const oldAttempt = before.pendingCompletion?.attemptId;
     assert.ok(oldAttempt);
@@ -3748,18 +3776,10 @@ test("v0.35.x: validated session handoff auto-retries a parked completion audit"
     // this is different from merely contacting the successor with a tool.
     await pi.fire("session_shutdown", { reason: "reload" }, first);
     const replacement = await freshSession(cwd, "reload");
-    await waitUntil(() => readLedger(cwd).some((entry) => entry.type === "audit_recovery_started"));
-
-    const afterStart = readState(cwd).goal as { status?: string; pendingCompletion?: { attemptId?: string; phase?: string } } | null;
-    assert.equal(afterStart?.status, "auditing", "the fresh host continues the detached audit, not the main goal");
-    assert.notEqual(afterStart?.pendingCompletion?.attemptId, oldAttempt, "recovery dispatch owns a fresh attempt");
-    assert.equal(readLedger(cwd).filter((entry) => entry.type === "audit_recovery_started").length, 1, "one recovery dispatch is ledgered");
-    assert.ok(replacement.ui.matching("Fresh session recovered the interrupted completion audit").length >= 1);
-
-    await waitUntil(() => {
-      const settled = readState(cwd).goal as { status?: string; pendingCompletion?: unknown; auditHistory?: unknown[] } | null;
-      return settled?.status === "active" && !settled.pendingCompletion && (settled.auditHistory?.length ?? 0) >= 1;
-    });
+    await tick(100);
+    await pi.command("goal", "resume", replacement);
+    assertUnknownAuditHeld(cwd, receipt);
+    assert.ok(replacement.ui.matching("outcome unknown").length > 0);
     await pi.fire("session_shutdown", { reason: "quit" }, replacement);
     await audit;
   } finally {
@@ -3771,7 +3791,7 @@ test("v0.35.x: validated session handoff auto-retries a parked completion audit"
   }
 });
 
-test("v0.35.x: explicit Auto-resume retries a parked claim on cold startup", async () => {
+test("v0.35.x: Auto-resume holds legacy identity-less claims until explicit replacement", async () => {
   __testOnlyResetStaleFlag();
   setGlobalAutoResume(true);
   const cwd = tmpCwd();
@@ -3795,11 +3815,17 @@ test("v0.35.x: explicit Auto-resume retries a parked claim on cold startup", asy
   });
   try {
     const ctx = await freshSession(cwd, "startup");
-    await waitUntil(() => readLedger(cwd).some((entry) => entry.type === "audit_recovery_started"));
-    const started = readState(cwd).goal as { status?: string; pendingCompletion?: { attemptId?: string } } | null;
-    assert.equal(started?.status, "auditing");
-    assert.notEqual(started?.pendingCompletion?.attemptId, oldAttempt);
-    assert.ok(ctx.ui.matching("Fresh session recovered the interrupted completion audit").length >= 1);
+    await tick(100);
+    assert.equal(readState(cwd).goal?.status, "paused");
+    assert.equal(readState(cwd).goal?.pendingCompletion?.attemptId, oldAttempt);
+    assert.equal(readLedger(cwd).filter((entry) => entry.type === "audit_recovery_started").length, 0);
+    assert.equal(fs.existsSync(path.join(cwd, "auditor-calls")), false);
+    await pi.command("goal", "resume", ctx);
+    assert.ok(ctx.ui.matching("legacy identity unknown").length > 0);
+    assert.equal(fs.existsSync(path.join(cwd, "auditor-calls")), false);
+    await pi.command("goal", "cancel", ctx);
+    await pi.command("goal", "start explicitly reauthorized objective — done when pinned", ctx);
+    await pi.command("goal", "verify", ctx);
     await waitUntil(() => {
       const settled = readState(cwd).goal as { status?: string; pendingCompletion?: unknown; auditHistory?: unknown[] } | null;
       return settled?.status === "active" && !settled.pendingCompletion && (settled.auditHistory?.length ?? 0) >= 1;
@@ -3834,6 +3860,7 @@ test("v0.35.x: manual /list resume retries a parked list completion claim direct
         at: new Date().toISOString(),
         phase: "recovery-pending",
         attemptId: oldAttempt,
+        auditorRoutingContract: captureAuditorRoutingContract(ownerCtx(cwd) as any, resolveAuditorModel),
       },
     }),
   });
@@ -3894,6 +3921,7 @@ test("v0.35.x: one automatic parked-audit retry is durable across repeated lifec
         at: new Date().toISOString(),
         phase: "recovery-pending",
         attemptId: oldAttempt,
+        auditorRoutingContract: captureAuditorRoutingContract(ownerCtx(cwd) as any, resolveAuditorModel),
       },
     }),
   });
@@ -3912,6 +3940,7 @@ test("v0.35.x: one automatic parked-audit retry is durable across repeated lifec
 
     // A second healthy lifecycle event must not launch another automatic
     // worker, even though it sees the claim in the old running phase.
+    const receipt = await removeRetainedRequest(cwd);
     const second = ownerCtx(cwd);
     await pi.fire("session_start", { reason: "reload" }, second);
     await tick(50);
@@ -3926,16 +3955,10 @@ test("v0.35.x: one automatic parked-audit retry is durable across repeated lifec
     assert.equal(afterReload?.pendingCompletion?.phase, "recovery-pending");
     assert.equal(afterReload?.pendingCompletion?.automaticRecoveryAttempted, true);
 
-    // Explicit manual resume remains a separate consent path after the
-    // automatic one-shot has been consumed.
+    // Manual resume is consent, not evidence that the first effect did not run.
     await pi.command("goal", "resume", second);
-    await waitUntil(() => {
-      const resumed = readState(cwd).goal as { status?: string; pendingCompletion?: { phase?: string; attemptId?: string } } | null;
-      return resumed?.status === "auditing" && resumed.pendingCompletion?.phase === "running";
-    });
-    const manualLedger = readLedger(cwd);
-    assert.equal(manualLedger.filter((entry) => entry.type === "audit_recovery_started").length, 1, "manual resume does not masquerade as automatic recovery");
-    assert.equal(manualLedger.filter((entry) => entry.type === "audit_started").length >= 2, true, "manual resume starts a fresh stored-claim audit");
+    assertUnknownAuditHeld(cwd, receipt, 1);
+    assert.ok(second.ui.matching("outcome unknown").length > 0);
     await pi.fire("session_shutdown", { reason: "quit" }, second);
   } finally {
     pi.sendMessageError = null;
@@ -3946,7 +3969,7 @@ test("v0.35.x: one automatic parked-audit retry is durable across repeated lifec
   }
 });
 
-test("v0.35.x: stale host replacement session_start auto-recovers the parked audit", async () => {
+test("v0.35.x: stale host replacement session_start holds unknown started audit without redispatch", async () => {
   __testOnlyResetStaleFlag();
   const cwd = tmpCwd();
   const fakePi = writeFakeAuditor(cwd, "disapproved", 350);
@@ -3961,6 +3984,7 @@ test("v0.35.x: stale host replacement session_start auto-recovers the parked aud
       verificationSummary: "The replacement session retries the durable claim.",
     }, first);
     await waitUntil(() => (readState(cwd).goal as { status?: string } | null)?.status === "auditing");
+    const receipt = await removeRetainedRequest(cwd);
 
     invalidateHostSession(pi, first);
     __testOnlyHeartbeatTick();
@@ -3982,16 +4006,10 @@ test("v0.35.x: stale host replacement session_start auto-recovers the parked aud
       },
     });
     await pi.fire("session_start", { reason: "startup" }, successor);
-    await waitUntil(() => readLedger(cwd).some((entry) => entry.type === "audit_recovery_started"));
-    const restarted = readState(cwd).goal as { status?: string; pendingCompletion?: { attemptId?: string } } | null;
-    assert.equal(restarted?.status, "auditing");
-    assert.notEqual(restarted?.pendingCompletion?.attemptId, oldAttempt);
-    assert.ok(successor.ui.matching("Fresh session recovered the interrupted completion audit").length >= 1);
-
-    await waitUntil(() => {
-      const settled = readState(cwd).goal as { status?: string; pendingCompletion?: unknown; auditHistory?: unknown[] } | null;
-      return settled?.status === "active" && !settled.pendingCompletion && (settled.auditHistory?.length ?? 0) >= 1;
-    });
+    await tick(100);
+    await pi.command("goal", "resume", successor);
+    assertUnknownAuditHeld(cwd, receipt);
+    assert.ok(successor.ui.matching("outcome unknown").length > 0);
     await pi.fire("session_shutdown", { reason: "quit" }, successor);
     await audit;
   } finally {
@@ -4003,7 +4021,7 @@ test("v0.35.x: stale host replacement session_start auto-recovers the parked aud
   }
 });
 
-test("v0.35.x: healthy same-session heartbeat recovers a parked completion audit without manual resume", { timeout: 15_000 }, async () => {
+test("v0.35.x: healthy same-session heartbeat cannot authorize unknown started audit redispatch", { timeout: 15_000 }, async () => {
   __testOnlyResetStaleFlag();
   __testOnlyResetOwnerSession();
   __testOnlySetSessionReplacementUntil(0);
@@ -4020,6 +4038,7 @@ test("v0.35.x: healthy same-session heartbeat recovers a parked completion audit
       verificationSummary: "A healthy same-session heartbeat retries the stored claim once.",
     }, first);
     await waitUntil(() => (readState(cwd).goal as { status?: string } | null)?.status === "auditing");
+    const receipt = await removeRetainedRequest(cwd);
 
     invalidateHostSession(pi, first);
     __testOnlyHeartbeatTick();
@@ -4034,21 +4053,10 @@ test("v0.35.x: healthy same-session heartbeat recovers a parked completion audit
     pi.sessionNameError = null;
     first.isIdle = () => true;
     first.hasPendingMessages = () => false;
-    await waitUntil(() => {
-      __testOnlyHeartbeatTick();
-      return readLedger(cwd).some((entry) => entry.type === "audit_recovery_started");
-    }, 4_000);
-
-    const retrying = readState(cwd).goal as { status?: string; pendingCompletion?: { phase?: string; automaticRecoveryAttempted?: boolean } } | null;
-    assert.equal(retrying?.status, "auditing", "healthy heartbeat starts the bounded recovery audit");
-    assert.equal(retrying?.pendingCompletion?.phase, "running");
-    assert.equal(retrying?.pendingCompletion?.automaticRecoveryAttempted, true);
-    assert.equal(readLedger(cwd).filter((entry) => entry.type === "audit_recovery_auto_retry_claimed").length, 1);
-
-    await waitUntil(() => {
-      const settled = readState(cwd).goal as { status?: string; pendingCompletion?: unknown; auditHistory?: unknown[] } | null;
-      return settled?.status === "active" && !settled.pendingCompletion && (settled.auditHistory?.length ?? 0) >= 1;
-    });
+    await tick(100);
+    await pi.command("goal", "resume", first);
+    assertUnknownAuditHeld(cwd, receipt);
+    assert.ok(first.ui.matching("outcome unknown").length > 0);
     await pi.fire("session_shutdown", { reason: "quit" }, first);
     await audit;
   } finally {
@@ -4180,6 +4188,7 @@ test("v0.35.x: stale host loss releases an in-flight completion audit without a 
       verificationSummary: "No semantic verdict is allowed when the host disappears.",
     }, first);
     await waitUntil(() => (readState(cwd).goal as { status?: string } | null)?.status === "auditing");
+    const receipt = await removeRetainedRequest(cwd);
 
     invalidateHostSession(pi, first);
     __testOnlyHeartbeatTick();
@@ -4215,27 +4224,10 @@ test("v0.35.x: stale host loss releases an in-flight completion audit without a 
     });
     const res = await pi.runTool("list_add", { items: ["after no-verdict recovery"] }, successor);
     assert.doesNotMatch(res.content[0]!.text, /only the MAIN session owns/);
-    await waitUntil(() => readLedger(cwd).some((entry) => entry.type === "audit_recovery_started"), 30_000);
-    const afterSuccessor = readState(cwd).goal as { status: string; pendingCompletion?: { phase?: string; automaticRecoveryAttempted?: boolean } };
-    assert.equal(afterSuccessor.status, "auditing", "successor starts the bounded no-verdict recovery audit");
-    assert.equal(afterSuccessor.pendingCompletion?.phase, "running");
-    assert.equal(afterSuccessor.pendingCompletion?.automaticRecoveryAttempted, true);
-    const afterLedger = fs.readFileSync(path.join(cwd, ".pi-glla", "active.jsonl"), "utf8");
-    assert.equal((afterLedger.match(/"audit_recovery_started"/g) ?? []).length, 1, "successor launches one recovery retry");
-    assert.equal((afterLedger.match(/"audit_recovery_auto_retry_claimed"/g) ?? []).length, 1, "successor claims the durable retry once");
-
-    // v0.35.17: 30s deadline — the chain spans a real detached worker
-    // process plus the recovery retry; under heavy machine load (observed
-    // load avg 12-16) the old 8s bound expired before the worker started.
-    await waitUntil(() => {
-      const settled = readState(cwd).goal as { status?: string; pendingCompletion?: { phase?: string; automaticRecoveryAttempted?: boolean } } | null;
-      return settled?.status === "paused"
-        && settled.pendingCompletion?.phase === "recovery-pending"
-        && settled.pendingCompletion?.automaticRecoveryAttempted === true;
-    }, 30_000);
-    const exhausted = readLedger(cwd);
-    assert.equal(exhausted.filter((entry) => entry.type === "audit_recovery_auto_retry_claimed").length, 1, "the failed automatic retry is not repeated");
-    assert.equal(exhausted.filter((entry) => entry.type === "audit_recovery_retry_scheduled").length, 0, "the failed one-shot retry does not re-arm itself");
+    await tick(100);
+    await pi.command("goal", "resume", successor);
+    assertUnknownAuditHeld(cwd, receipt);
+    assert.ok(successor.ui.matching("outcome unknown").length > 0);
     await pi.fire("session_shutdown", { reason: "quit" }, successor);
     await audit;
     __testOnlyResetOwnerSession();

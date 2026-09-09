@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
@@ -1447,7 +1447,7 @@ process.exit(0);
       model: "test/provider-model",
       thinkingLevel: "medium",
       // RAW specs on purpose: exactly what the settings layer stores.
-      allowedExtensions: ["npm:pi-webaio@^2", "./relext.ts", "npm:not-installed", "/definitely/missing.ts"],
+      allowedExtensions: ["npm:pi-webaio@^2", "./relext.ts"],
       runtime: {
         workerPath: stubWorker,
         env: { PI_REQUEST_COPY: requestCopy },
@@ -1460,11 +1460,11 @@ process.exit(0);
     });
     assert.ok(result.error, "stub worker never produces a verdict");
     const request = JSON.parse(await readFile(requestCopy, "utf8"));
-    // The hashed request carries RESOLVED install paths; unresolvable
-    // entries (not-installed package, missing path) are dropped fail-closed.
+    // The hashed request carries every required resolved install path.
+    // Missing entries are covered by the strict no-spawn boundary tests.
     assert.deepEqual(request.allowedExtensions, [
-      path.join(fakeHomeAgent, "npm", "node_modules", "pi-webaio"),
-      path.join(fakeHomeAgent, "relext.ts"),
+      realpathSync(path.join(fakeHomeAgent, "npm", "node_modules", "pi-webaio")),
+      realpathSync(path.join(fakeHomeAgent, "relext.ts")),
     ]);
     const verified = { ...request };
     delete (verified as Record<string, unknown>).requestHash;

@@ -8,6 +8,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { captureAuditorRoutingContract } from "./auditor-routing-contract.js";
+import { resolveAuditorModel } from "./loops/goal-settings-ui.js";
 import type { ExtensionContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { renderAgentsPanel, tailChildTranscript, TRANSCRIPT_HEADER_SCAN_MAX_BYTES } from "./goal-agents-panel.js";
 
@@ -90,7 +92,7 @@ export interface CommandDeps {
   listQueue: () => NonNullable<State["list"]>;
   notifyExternal: (ctx: ExtensionContext, message: string) => void;
   persistState: (ctx: ExtensionContext) => void;
-  updateGoal: (patch: Partial<Goal>, ctx: ExtensionContext) => void;
+  updateGoal: (patch: Partial<Goal>, ctx: ExtensionContext) => boolean | void;
   setGoal: (goal: Goal, ctx: ExtensionContext, via?: string) => boolean;
   archiveCurrentGoal: (ctx: ExtensionContext, status: Status, stopReason?: string) => boolean;
   healGoalPolicy: (ctx: ExtensionContext) => boolean;
@@ -231,12 +233,15 @@ async function cmdGoal(args: string, ctx: ExtensionContext): Promise<void> {
         ctx.ui.notify("An audit is already running…", "info");
         return;
       }
-      updateGoal({
-        pendingCompletion: {
-          completionSummary: "Manual audit requested by the user via /goal verify (no agent completion claim). Verify the objective against the repo directly.",
-          at: nowIso(),
-        },
-      }, ctx);
+      if (!state.goal.pendingCompletion) {
+        try {
+          if (updateGoal({ pendingCompletion: {
+            completionSummary: "Manual audit requested by the user via /goal verify (no agent completion claim). Verify the objective against the repo directly.",
+            at: nowIso(),
+            auditorRoutingContract: captureAuditorRoutingContract(ctx, resolveAuditorModel),
+          } }, ctx) === false) return;
+        } catch (error) { ctx.ui.notify(String(error), "warning"); return; }
+      }
       appendLedger(ctx.cwd, "manual_audit_requested", { goalId: state.goal.id });
       void retryStoredCompletionAudit("manual");
       return;
