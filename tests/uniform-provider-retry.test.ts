@@ -29,10 +29,14 @@ test("the first provider retry is eager for every failure family", () => {
 
 test("later provider retries use one bounded configured ladder", () => {
   const nowMs = Date.parse("2026-08-07T01:18:01.930Z");
+  // Rapid window first: flat 5s through attempt 720, ladder after.
   for (const raw of ["429 retry in 4 hours", "billing required", "503 unavailable", "unknown failure"]) {
-    assert.equal(mainModelFailureDelayMs(classifyMainModelFailure(raw), 2, 15, nowMs), 30 * 60_000, raw);
+    assert.equal(mainModelFailureDelayMs(classifyMainModelFailure(raw), 2, 15, nowMs), 5_000, raw);
+    assert.equal(mainModelFailureDelayMs(classifyMainModelFailure(raw), 720, 15, nowMs), 5_000, raw);
+    assert.equal(mainModelFailureDelayMs(classifyMainModelFailure(raw), 721, 15, nowMs), 15 * 60_000, raw);
+    assert.equal(mainModelFailureDelayMs(classifyMainModelFailure(raw), 722, 15, nowMs), 30 * 60_000, raw);
   }
-  assert.equal(mainModelFailureDelayMs(classifyMainModelFailure("503 unavailable"), 2, 45, nowMs), 90 * 60_000);
+  assert.equal(mainModelFailureDelayMs(classifyMainModelFailure("503 unavailable"), 722, 45, nowMs), 90 * 60_000);
 });
 
 test("main-model recovery has no quota-derived policy branch", () => {

@@ -7,6 +7,10 @@
 
 export const MAIN_MODEL_MAX_RETRY_DELAY_MS = 5 * 60 * 60_000;
 export const MAIN_MODEL_AUTO_RETRY_HORIZON_MS = 24 * 60 * 60_000;
+/** Rapid window: flat 5s probes before the exponential ladder starts.
+ * 720x5s ~= first hour. Attempt-based (not wall-clock) so it survives
+ * reload via persisted attempts. See mainModelRetryDelayMs. */
+export const MAIN_MODEL_RAPID_ATTEMPTS = 720;
 export const DEFAULT_MAIN_MODEL_PRIMARY_PROBE_MINUTES = 15;
 /** Keep a fallback chain useful and bounded even when settings are edited
  * outside the UI. Ten alternatives is enough to cross providers/model pools
@@ -261,13 +265,16 @@ export function nextUntriedModelRef(current: string | undefined, refs: string[],
 }
 
 /**
- * Retry slowly rather than spin: base → 2×base → 4×base → 8×base → 16×base
- * → 5h, then hold after the 24h automatic window. The base is the
- * mainModelRetryMinutes setting and is used by ordinary provider failures.
+ * Rapid-first ladder: flat 5s for MAIN_MODEL_RAPID_ATTEMPTS, then
+ * base → 2×base → 4×base → 8×base → 16×base → 5h, then hold after the
+ * 24h automatic window (aggressiveMode disables the horizon, not the ladder).
+ * The base is the mainModelRetryMinutes setting.
  */
 export function mainModelRetryDelayMs(attempt: number, baseMinutes = 15): number {
+  if (attempt <= MAIN_MODEL_RAPID_ATTEMPTS) return 5_000;
   const base = Number.isFinite(baseMinutes) && baseMinutes > 0 ? baseMinutes : 15;
-  const minutes = Math.min(base * 2 ** Math.max(0, attempt - 1), MAIN_MODEL_MAX_RETRY_DELAY_MS / 60_000);
+  const ladderStep = Math.max(0, attempt - MAIN_MODEL_RAPID_ATTEMPTS - 1);
+  const minutes = Math.min(base * 2 ** ladderStep, MAIN_MODEL_MAX_RETRY_DELAY_MS / 60_000);
   return Math.round(minutes * 60_000);
 }
 
@@ -292,11 +299,10 @@ export function hourAlignedRetryDelayMs(nowMs = Date.now()): number {
 
 /** One uniform envelope for EVERY provider failure. Error text and upstream
  * Retry-After prose are not trusted to choose a cadence. Every recoverable
- * failure gets the same eager first retry, then the bounded configured ladder;
- * the separate hourly retry adds the :00:30 slot. */
+ * failure gets flat 5s probes for the rapid window, then the bounded
+ * configured ladder; the separate hourly retry adds the :00:30 slot. */
 export function mainModelFailureDelayMs(failure: MainModelFailure, attempt: number, baseMinutes = 15, nowMs = Date.now()): number {
   void failure;
   void nowMs;
-  if (attempt <= 1) return 5_000;
   return mainModelRetryDelayMs(attempt, baseMinutes);
 }

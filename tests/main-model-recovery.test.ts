@@ -19,6 +19,7 @@ import {
   modelRef,
   nextUntriedModelRef,
   MAX_MAIN_MODEL_FALLBACKS,
+  MAIN_MODEL_RAPID_ATTEMPTS,
   normalizeMainModelFallbackRefs,
   normalizeModelRefs,
   formatMainModelFallbacks,
@@ -379,21 +380,30 @@ test("main model errors stay opaque to the recovery policy", () => {
 });
 
 test("main model recovery backs off without giving up", () => {
-  assert.equal(mainModelRetryDelayMs(1, 15), 15 * 60_000);
-  assert.equal(mainModelRetryDelayMs(2, 15), 30 * 60_000);
+  // Rapid-first ladder: flat 5s for MAIN_MODEL_RAPID_ATTEMPTS (~first hour),
+  // then base → 2x → 4x → cap 5h.
+  assert.equal(MAIN_MODEL_RAPID_ATTEMPTS, 720);
+  assert.equal(mainModelRetryDelayMs(1, 15), 5_000);
+  assert.equal(mainModelRetryDelayMs(2, 15), 5_000);
+  assert.equal(mainModelRetryDelayMs(720, 15), 5_000);
+  assert.equal(mainModelRetryDelayMs(721, 15), 15 * 60_000);
+  assert.equal(mainModelRetryDelayMs(722, 15), 30 * 60_000);
   assert.equal(isMainModelFailbackAuto(undefined), true);
   assert.equal(isMainModelFailbackAuto("sticky"), false);
   assert.equal(mainModelPrimaryProbeDelayMs(15), 15 * 60_000);
-  assert.equal(mainModelRetryDelayMs(3, 15), 60 * 60_000);
-  assert.equal(mainModelRetryDelayMs(4, 15), 2 * 60 * 60_000);
-  assert.equal(mainModelRetryDelayMs(5, 15), 4 * 60 * 60_000);
-  assert.equal(mainModelRetryDelayMs(6, 15), 5 * 60 * 60_000);
-  assert.equal(mainModelRetryDelayMs(20, 15), 5 * 60 * 60_000);
+  assert.equal(mainModelRetryDelayMs(723, 15), 60 * 60_000);
+  assert.equal(mainModelRetryDelayMs(724, 15), 2 * 60 * 60_000);
+  assert.equal(mainModelRetryDelayMs(725, 15), 4 * 60 * 60_000);
+  assert.equal(mainModelRetryDelayMs(726, 15), 5 * 60 * 60_000);
+  assert.equal(mainModelRetryDelayMs(2000, 15), 5 * 60 * 60_000);
   const nowMs = Date.parse("2026-08-07T01:18:01.930Z");
-  // Every recoverable provider failure gets the same eager retry, then joins
+  // Every recoverable provider failure gets flat rapid retries, then joins
   // the configured ladder.
   assert.equal(mainModelFailureDelayMs(classifyMainModelFailure("429 Too Many Requests"), 1, 15, nowMs), 5_000);
-  assert.equal(mainModelFailureDelayMs(classifyMainModelFailure("429 Too Many Requests"), 2, 15, nowMs), 30 * 60_000);
+  assert.equal(mainModelFailureDelayMs(classifyMainModelFailure("429 Too Many Requests"), 2, 15, nowMs), 5_000);
+  assert.equal(mainModelFailureDelayMs(classifyMainModelFailure("429 Too Many Requests"), 720, 15, nowMs), 5_000);
+  assert.equal(mainModelFailureDelayMs(classifyMainModelFailure("429 Too Many Requests"), 721, 15, nowMs), 15 * 60_000);
+  assert.equal(mainModelFailureDelayMs(classifyMainModelFailure("429 Too Many Requests"), 722, 15, nowMs), 30 * 60_000);
   for (const raw of [
     "503 temporarily unavailable",
     "insufficient credits — buy credits",
@@ -401,11 +411,14 @@ test("main model recovery backs off without giving up", () => {
     "mysterious provider prose with no hint",
   ]) {
     assert.equal(mainModelFailureDelayMs(classifyMainModelFailure(raw), 1, 15, nowMs), 5_000, raw);
-    assert.equal(mainModelFailureDelayMs(classifyMainModelFailure(raw), 2, 15, nowMs), 30 * 60_000, raw);
+    assert.equal(mainModelFailureDelayMs(classifyMainModelFailure(raw), 720, 15, nowMs), 5_000, raw);
+    assert.equal(mainModelFailureDelayMs(classifyMainModelFailure(raw), 721, 15, nowMs), 15 * 60_000, raw);
+    assert.equal(mainModelFailureDelayMs(classifyMainModelFailure(raw), 722, 15, nowMs), 30 * 60_000, raw);
   }
-  // The setting controls the later ladder; the first retry stays eager.
+  // The setting controls the later ladder; the rapid window stays flat.
   assert.equal(mainModelFailureDelayMs(classifyMainModelFailure("503 temporarily unavailable"), 1, 45, nowMs), 5_000);
-  assert.equal(mainModelFailureDelayMs(classifyMainModelFailure("503 temporarily unavailable"), 2, 45, nowMs), 90 * 60_000);
+  assert.equal(mainModelFailureDelayMs(classifyMainModelFailure("503 temporarily unavailable"), 721, 45, nowMs), 45 * 60_000);
+  assert.equal(mainModelFailureDelayMs(classifyMainModelFailure("503 temporarily unavailable"), 722, 45, nowMs), 90 * 60_000);
   assert.equal(mainModelFailureDelayMs(classifyMainModelFailure("Token Plan rate limit reached (2062); retry after 3 hours"), 1, 15, nowMs), 5_000);
   assert.equal(mainModelAutoRetryUntil(Date.parse("2026-08-03T00:00:00Z")), "2026-08-04T00:00:00.000Z");
   assert.equal(modelRef({ provider: "openai", id: "gpt" }), "openai/gpt");
