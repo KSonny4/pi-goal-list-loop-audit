@@ -11,6 +11,9 @@ export const MAIN_MODEL_AUTO_RETRY_HORIZON_MS = 24 * 60 * 60_000;
  * 720x5s ~= first hour. Attempt-based (not wall-clock) so it survives
  * reload via persisted attempts. See mainModelRetryDelayMs. */
 export const MAIN_MODEL_RAPID_ATTEMPTS = 720;
+/** Same-model window: retry the current model only before walking fallbacks.
+ * 12x5s = first minute. Prevents failover on a blip. */
+export const MAIN_MODEL_SAME_MODEL_ATTEMPTS = 12;
 export const DEFAULT_MAIN_MODEL_PRIMARY_PROBE_MINUTES = 15;
 /** Keep a fallback chain useful and bounded even when settings are edited
  * outside the UI. Ten alternatives is enough to cross providers/model pools

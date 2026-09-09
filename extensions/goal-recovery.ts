@@ -32,6 +32,7 @@ import {
   mainModelPrimaryProbeDelayMs,
   mainModelRetryDelayMs,
   MAIN_MODEL_AUTO_RETRY_HORIZON_MS,
+  MAIN_MODEL_SAME_MODEL_ATTEMPTS,
   modelRef,
   normalizeBoundedModelRefs,
   normalizeMainModelFallbackRefs,
@@ -580,6 +581,9 @@ export async function tryMainModelFallback(ctx: ExtensionContext, failure: MainM
   // wording never opts a failure in or out of fallback behavior; only an
   // explicit user abort/non-recoverable result is refused here.
   if (failure.kind === "non-recoverable" || !isMainModelFallbackFailure(failure)) return false;
+  // Same-model-first: retry current model for the first minute before
+  // walking fallbacks. Lets a blip recover without a disruptive switch.
+  if ((state.mainModelRecovery?.attempts ?? 0) < MAIN_MODEL_SAME_MODEL_ATTEMPTS) return false;
   // A replacement session may arrive while the old setModel promise is still
   // pending. Its fence must not block the fresh generation from recovering;
   // the old finally below is token-guarded and cannot clear the new fence.
@@ -1230,6 +1234,26 @@ async function probeMainModelRecoveryImpl(ctx: ExtensionContext): Promise<void> 
     }
     appendLedger(ctx.cwd, "main_model_probe", { from: current, to: current, attempts: recovery.attempts, mode: "resume-backup" });
     ctx.ui.notify(`Main model recovery probe: continuing on ${current}; primary will be tested after this supervised turn.`, "info");
+    return;
+  }
+  // Same-model-first: timed probes also stay on current for the first minute.
+  // Immediate failover is already gated in tryMainModelFallback; this covers
+  // the delayed-probe walk so a blip never triggers a switch.
+  if (current && recovery.attempts < MAIN_MODEL_SAME_MODEL_ATTEMPTS) {
+    const next = { ...recovery, active: current, attempted: [current], retryAt: undefined, resumeCurrent: undefined, pendingModelSwitch: undefined };
+    state.mainModelRecovery = next;
+    persistState(ctx);
+    appendLedger(ctx.cwd, "main_model_probe", { from: current, to: current, attempts: recovery.attempts, mode: "same-model-window" });
+    flags.continuationDispatchStoodDown = false;
+    if (recovery.kind === "goal" && state.goal?.status === "paused" && (state.goal.pauseReason ?? "").startsWith("main model recovery")) {
+      updateGoal({ status: "active", pauseKind: undefined, pauseResumeAt: undefined, pauseReason: undefined, pauseSuggestedAction: undefined, providerErrorDiagnostic: undefined, recoveryEpisodeKey: undefined, recoveryNoticeKeys: undefined }, ctx);
+      scheduleContinuation(ctx, true, 1_000);
+    } else if (recovery.kind === "loop" && state.loop && !state.loop.active && (state.loop.stopReason ?? "").startsWith("main model recovery")) {
+      state.loop = { ...state.loop, active: true, stopReason: undefined };
+      persistState(ctx);
+      scheduleLoopTick(ctx);
+    }
+    ctx.ui.notify(`Main model recovery probe: retrying ${current} (same-model window, fallback walk starts after minute 1).`, "info");
     return;
   }
   // Use the same ordered selector for immediate failover and delayed probes.

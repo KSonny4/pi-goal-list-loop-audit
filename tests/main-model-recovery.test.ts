@@ -20,6 +20,7 @@ import {
   nextUntriedModelRef,
   MAX_MAIN_MODEL_FALLBACKS,
   MAIN_MODEL_RAPID_ATTEMPTS,
+  MAIN_MODEL_SAME_MODEL_ATTEMPTS,
   normalizeMainModelFallbackRefs,
   normalizeModelRefs,
   formatMainModelFallbacks,
@@ -115,6 +116,16 @@ test("runtime fallback walk uses one supervised model at a time and preserves le
       scheduleSessionTimeout: () => setTimeout(() => {}, 60_000),
     });
     const accountFailure = classifyMainModelFailure("usage limit reached; switch billing");
+    // Same-model-first: attempts < window stays on current. Seed past the
+    // window so this walk tests fallback order, not the gate.
+    state.mainModelRecovery = {
+      primary: "provider/primary",
+      active: "provider/primary",
+      attempted: ["provider/primary"],
+      attempts: MAIN_MODEL_SAME_MODEL_ATTEMPTS,
+      reason: "main model recovery — provider error",
+      kind: "goal",
+    };
     assert.equal(await tryMainModelFallback(ctx, accountFailure), true);
     assert.deepEqual(calls, ["provider/first"], "the first failure selects only the first eligible backup");
     assert.deepEqual(state.mainModelRecovery?.attempted, ["provider/primary", "provider/blocked", "provider/first"]);
@@ -129,12 +140,13 @@ test("runtime fallback walk uses one supervised model at a time and preserves le
 
     // The delayed/scheduled probe has its own selector path. A successful
     // probe target must be attempted, not persisted as an unregistered skip.
+    // Past the same-model window so the probe walks the chain.
     ctx.model = { provider: "provider", id: "primary" };
     state.mainModelRecovery = {
       primary: "provider/primary",
       active: "provider/primary",
       attempted: ["provider/primary"],
-      attempts: 1,
+      attempts: MAIN_MODEL_SAME_MODEL_ATTEMPTS + 1,
       reason: "main model recovery — provider error",
       kind: "goal",
     };
@@ -158,7 +170,7 @@ test("runtime fallback walk uses one supervised model at a time and preserves le
       primary: "provider/primary",
       active: "provider/primary",
       attempted: ["provider/primary"],
-      attempts: 0,
+      attempts: MAIN_MODEL_SAME_MODEL_ATTEMPTS,
       reason: "provider error",
       kind: "goal",
       quotaSignal: "rate-limit",
@@ -171,7 +183,7 @@ test("runtime fallback walk uses one supervised model at a time and preserves le
       primary: "provider/primary",
       active: "provider/primary",
       attempted: ["provider/primary"],
-      attempts: 0,
+      attempts: MAIN_MODEL_SAME_MODEL_ATTEMPTS,
       reason: "provider error",
       kind: "goal",
       quotaSignal: "rate-limit",
@@ -244,6 +256,15 @@ test("successful fallback turns keep the preferred primary and fail back after a
     });
 
     const failure = classifyMainModelFailure("503 temporarily unavailable");
+    // Past the same-model window so this tests failover, not the gate.
+    state.mainModelRecovery = {
+      primary: "provider/primary",
+      active: "provider/primary",
+      attempted: ["provider/primary"],
+      attempts: MAIN_MODEL_SAME_MODEL_ATTEMPTS,
+      reason: "main model recovery — provider error",
+      kind: "goal",
+    };
     assert.equal(await tryMainModelFallback(ctx, failure), true);
     ctx.model = { provider: "provider", id: "backup" };
     mainModelRecoverySucceeded(ctx);
