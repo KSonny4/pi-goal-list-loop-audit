@@ -77,3 +77,23 @@ Rules:
 - The daemon owns the commit; do not hand-commit `.pi-glla` deltas
   unless the daemon is paused (then commit with the repo-local
   `<repo>-dev` identity).
+
+## Shared Engineering Guidance — consumer adoption (prepare-only, L1 informative)
+
+This fork (`KSonny4/pi-goal-list-loop-audit`) is adopted as a Fabric/Guidance
+CONSUMER only. Nothing here changes supervisor, auditor, queue or release
+behaviour: no supervisor upgrade, no second turn driver, no GLLA installation
+changes, no audit-contract edits under this task. Pushes go to `origin`
+(KSonny4 fork) only — never to `upstream` (DraconDev).
+
+Profile: script-library / L1 informative (agent extension, audit tooling).
+Adopted revision: `KSonny4/engineering-guidance@656d5569f261afb75f7c7685bea55e1e71518f9b`
+(reviewed merge, main). Load `AGENTS.md` plus task-triggered playbooks at that revision;
+record files actually loaded. Existing active sessions keep their valid pins.
+
+Context Fabric (interface v0.1 PROPOSED — pending, not active): no endpoint is configured,
+no registration or indexing is claimed. When a published runtime exists, search is optional
+and authenticated; mandatory guidance above never depends on it.
+
+Adoption record: prepared 2026-09-14 (branch `pi/fabric-p3-prepare`); adopted/loaded/indexed/
+verified pending shared runtime publication (P4) and P6 activation.
